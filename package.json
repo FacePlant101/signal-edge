@@ -1,0 +1,32 @@
+{
+	"name": "signal-edge",
+	"version": "0.1.0",
+	"description": "A Signal linked-device client for Cloudflare Workers and other WASM runtimes: userland TLS pinned to Signal's CA, libsignal sessions, sealed sender, groups, persistence in SQLite.",
+	"license": "AGPL-3.0-only",
+	"type": "module",
+	"repository": { "type": "git", "url": "git+https://github.com/FacePlant101/signal-edge.git" },
+	"exports": {
+		".": { "types": "./dist/index.d.ts", "default": "./dist/index.js" },
+		"./workers": { "types": "./dist/workers.d.ts", "default": "./dist/workers.js" },
+		"./selftest": { "types": "./dist/selftest/index.d.ts", "default": "./dist/selftest/index.js" },
+		"./wasm/*": "./dist/vendor/*"
+	},
+	"files": ["dist", "LICENSE", "README.md"],
+	"sideEffects": ["./dist/workers.js"],
+	"scripts": {
+		"build": "rm -rf dist && tsc -p tsconfig.build.json && node scripts/copy-vendor.mjs",
+		"typecheck": "tsc --noEmit",
+		"test": "npm run build && node --test --test-reporter=spec test/*.test.mjs",
+		"prepare": "npm run build",
+		"build:tls": "bash scripts/build-tls.sh",
+		"build:sealed": "bash scripts/build-sealed.sh"
+	},
+	"dependencies": {
+		"@getmaapp/signal-wasm": "0.6.6"
+	},
+	"devDependencies": {
+		"@cloudflare/workers-types": "^5.20261103.1",
+		"@types/node": "^22.10.0",
+		"typescript": "^5.9.3"
+	}
+}

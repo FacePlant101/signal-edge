@@ -1,0 +1,15 @@
+{
+	"$schema": "node_modules/wrangler/config-schema.json",
+	"name": "signal-edge-example",
+	"main": "src/index.ts",
+	"compatibility_date": "2026-11-03",
+	"compatibility_flags": ["nodejs_compat"],
+	"observability": { "enabled": true },
+	"durable_objects": {
+		"bindings": [{ "name": "ACCOUNT", "class_name": "SignalAccount" }]
+	},
+	"migrations": [{ "tag": "v1", "new_sqlite_classes": ["SignalAccount"] }]
+	// Secrets (wrangler secret put, or .dev.vars locally):
+	//   ADMIN_TOKEN  at least 32 characters; every route needs "Authorization: Bearer <token>"
+	//   STORAGE_KEY  32 random bytes, base64 (openssl rand -base64 32): encrypts everything stored
+}

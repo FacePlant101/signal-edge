@@ -1,0 +1,13 @@
+node_modules/
+dist/
+tls/target/
+sealed/target/
+examples/*/node_modules/
+examples/*/.wrangler/
+examples/*/dist/
+.dev.vars
+.env*
+*.log
+# Never commit Signal account material
+*.db
+*.sqlite

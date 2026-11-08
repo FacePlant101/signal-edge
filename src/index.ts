@@ -42,6 +42,10 @@ export {
 	parseContent,
 	unpad,
 	extractMentions,
+	checkMentions,
+	validMentions,
+	showMentions,
+	defuseMentionTokens,
 	ACI_PATTERN,
 	ENVELOPE,
 	CIPHERTEXT,
@@ -60,5 +64,5 @@ export { readStorage, STORAGE_HOST, type StorageSnapshot, type StorageContact, t
 export { downloadAttachment, decryptAttachment, uploadAttachment, attachmentPointer, LONG_TEXT_TYPE, type AttachmentPointer } from "./protocol/attachments.js";
 export { accessKey, unseal, libsignalExtra, CONTENT_HINT } from "./protocol/sealed.js";
 export { signal } from "./protocol/wasm.js";
-export { encode as encodeProto, Decoded as ProtoDecoded } from "./protocol/proto.js";
-export { fromBase64, toBase64, randomBytes } from "./util/bytes.js";
+export { encode as encodeProto, Decoded as ProtoDecoded, decodeProvisioningAddress } from "./protocol/proto.js";
+export { enc, dec, concat, fromBase64, toBase64, randomBytes, timingSafeEqual } from "./util/bytes.js";

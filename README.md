@@ -143,10 +143,21 @@ npm test           # builds, then runs the self-tests and client tests in Node 2
 cd examples/worker && npm install && npm run check   # typecheck + wrangler bundle (dry run)
 ```
 
-Rebuilding the WASM (only after changing `tls/` or `sealed/`) needs rustup with the `wasm32-unknown-unknown` target, LLVM clang and llvm-ar, `wasm-bindgen-cli` 0.2.130, and `protoc` for `sealed/`. Then run `npm run build:tls` / `npm run build:sealed` and commit `src/vendor/`.
+Rebuilding the WASM (only after changing `tls/` or `sealed/`) needs rustup with the `wasm32-unknown-unknown` target, LLVM clang and llvm-ar, `wasm-bindgen-cli` 0.2.130, and `protoc` for `sealed/`. Then run `npm run build:tls` / `npm run build:sealed` and commit `src/vendor/`. After a change to either `Cargo.lock`, regenerate the license notices with `python3 scripts/third-party-licenses.py` and commit `THIRD_PARTY_LICENSES.txt`.
+
+## Credits
+
+signal-edge stands on Signal's own work. Thanks to:
+
+- **[Signal Messenger](https://signal.org)**: [Signal-Desktop](https://github.com/signalapp/Signal-Desktop), whose linking, sending, receiving, groups and storage-service code this library follows and in places ports (each source file names the Desktop functions it follows), and [libsignal](https://github.com/signalapp/libsignal), whose Rust crates `sealed/` is built on and whose root certificates `tls/` pins. [Signal-Android](https://github.com/signalapp/Signal-Android) was a reference for timer behaviour.
+- **[signal-wasm](https://github.com/getmaapp/signal-wasm)** by getmaapp: libsignal compiled to WebAssembly. It made a Worker-native client possible.
+- **[rustls](https://github.com/rustls/rustls)** and **[ring](https://github.com/briansmith/ring)**: the TLS 1.3 stack inside `tls/`.
+- **[wasm-bindgen](https://github.com/rustwasm/wasm-bindgen)**, the **[RustCrypto](https://github.com/RustCrypto)** crates, **[curve25519-dalek](https://github.com/dalek-cryptography/curve25519-dalek)**, **[libcrux](https://github.com/cryspen/libcrux)** and the other crates listed in [THIRD_PARTY_LICENSES.txt](THIRD_PARTY_LICENSES.txt), with their licenses.
+
+Written by FacePlant101, with [Claude Code](https://claude.com/claude-code).
+
+"Signal" is a trademark of Signal Messenger, LLC. signal-edge is an independent, unofficial project, not affiliated with or endorsed by Signal Messenger, LLC. See [NOTICE](NOTICE).
 
 ## License
 
-AGPL-3.0-only. libsignal, which `sealed/` and `@getmaapp/signal-wasm` are built from, is AGPL-3.0. If you run a modified version as a network service, the AGPL requires you to offer its source to that service's users.
-
-Protocol details are ported from [Signal-Desktop](https://github.com/signalapp/Signal-Desktop) and [libsignal](https://github.com/signalapp/libsignal); source files name the functions they follow.
+AGPL-3.0-only (see [LICENSE](LICENSE) and [NOTICE](NOTICE)). libsignal, which `sealed/` and `@getmaapp/signal-wasm` are built from, is AGPL-3.0. If you run a modified version as a network service, the AGPL requires you to offer its source to that service's users. The prebuilt WebAssembly also contains crates under MIT, Apache-2.0, ISC, BSD, MPL-2.0 and Unicode licenses; their notices are in [THIRD_PARTY_LICENSES.txt](THIRD_PARTY_LICENSES.txt).

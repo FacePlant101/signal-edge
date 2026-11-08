@@ -3,16 +3,37 @@
 	"version": "0.1.0",
 	"description": "A Signal linked-device client for Cloudflare Workers and other WASM runtimes: userland TLS pinned to Signal's CA, libsignal sessions, sealed sender, groups, persistence in SQLite.",
 	"license": "AGPL-3.0-only",
+	"author": "FacePlant101",
 	"type": "module",
-	"repository": { "type": "git", "url": "git+https://github.com/FacePlant101/signal-edge.git" },
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/FacePlant101/signal-edge.git"
+	},
 	"exports": {
-		".": { "types": "./dist/index.d.ts", "default": "./dist/index.js" },
-		"./workers": { "types": "./dist/workers.d.ts", "default": "./dist/workers.js" },
-		"./selftest": { "types": "./dist/selftest/index.d.ts", "default": "./dist/selftest/index.js" },
+		".": {
+			"types": "./dist/index.d.ts",
+			"default": "./dist/index.js"
+		},
+		"./workers": {
+			"types": "./dist/workers.d.ts",
+			"default": "./dist/workers.js"
+		},
+		"./selftest": {
+			"types": "./dist/selftest/index.d.ts",
+			"default": "./dist/selftest/index.js"
+		},
 		"./wasm/*": "./dist/vendor/*"
 	},
-	"files": ["dist", "LICENSE", "README.md"],
-	"sideEffects": ["./dist/workers.js"],
+	"files": [
+		"dist",
+		"LICENSE",
+		"NOTICE",
+		"THIRD_PARTY_LICENSES.txt",
+		"README.md"
+	],
+	"sideEffects": [
+		"./dist/workers.js"
+	],
 	"scripts": {
 		"build": "rm -rf dist && tsc -p tsconfig.build.json && node scripts/copy-vendor.mjs",
 		"typecheck": "tsc --noEmit",

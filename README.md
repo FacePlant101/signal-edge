@@ -1,10 +1,10 @@
 # signal-edge
 
-A Signal client that runs as a **linked device** (like Signal Desktop) inside Cloudflare Workers, or any JavaScript runtime that can open a TCP socket and run WebAssembly. It links to an existing Signal account with a QR code, keeps a live connection to Signal, decrypts what arrives, and sends 1:1 and group texts. No signal-cli, JVM, container or VPS.
+A Signal client that runs as a **linked device** (like Signal Desktop) inside Cloudflare Workers, or any JavaScript runtime that can open a TCP socket and run WebAssembly. It links to an existing Signal account with a QR code, keeps a live connection to Signal, decrypts what arrives, and sends 1:1 and group messages with attachments, quotes, reactions and mentions. No signal-cli, JVM, container or VPS.
 
 > **Unofficial.** This is not Signal's software, Signal doesn't support it, and it can break whenever Signal changes its servers. Try it with a spare number first. It handles real end-to-end-encrypted traffic and stores keys that can read it: treat the storage key like a password.
 
-Extracted from [signal-mcp-worker](https://github.com/FacePlant101/signal-mcp-worker), where it runs against a real account.
+Extracted from [signal-mcp-worker](https://github.com/FacePlant101/signal-mcp-worker) (as of its PR #16), where it runs against a real account.
 
 ## What works
 
@@ -15,11 +15,15 @@ Extracted from [signal-mcp-worker](https://github.com/FacePlant101/signal-mcp-wo
 | Prekeys (one-time, Kyber, signed, last resort; refill and rotation like Desktop) | verified on a real account |
 | 1:1 and group text sends, sync transcripts to your other devices | verified on a real account |
 | Contacts and groups (storage service, zkgroup credentials, group state) | verified on a real account |
+| Attachment download and decryption, long received texts | verified on a real account |
 | Safety-number changes (accepted like the apps do, recorded in the chat) | verified on Workers (self-test) |
 | Sealed-sender sends, retry requests (resend after a failed decrypt) | self-test only; not yet seen by a real recipient |
-| Attachment download and decryption | built; needs a real-world test |
+| Sending attachments and long texts (long-text attachment past 2000 bytes) | deployed; not yet seen by a real recipient |
+| Sender-key group sends (`multi_recipient`, group send endorsements; falls back to one copy per member) | deployed; not yet run in a group of 3+ |
+| Disappearing-message timers, quoted replies, reactions, mentions | built; not yet seen on real clients |
+| Counters and last errors that survive restarts | built |
 
-Not there yet: sending attachments and long texts (over 2000 bytes), phone-number lookup (CDSI needs SGX attestation, so recipients are ACIs), delivery/read receipts, sender-key group sends (`multi_recipient`; groups are sent as one copy per member), stories, calls, registering a new primary account.
+Not there yet: phone-number lookup (CDSI needs SGX attestation, so recipients are ACIs), delivery/read receipts, stories, calls, registering a new primary account.
 
 ## How it works
 
@@ -115,7 +119,7 @@ The WASM files are `@getmaapp/signal-wasm/signal_wasm_bg.wasm`, `signal-edge/was
 | `startLink()` | opens the provisioning socket, returns the `sgnl://linkdevice` URL; linking finishes in the background (`waitUntil`) |
 | `maintain()` | watchdog: (re)connects the receive socket, prunes retry state, refreshes prekeys and contacts when due; returns when to run next |
 | `startReceiving()`, `stopReceiving()`, `receiveStatus()` | the receive socket and its counters |
-| `sendText(to, body)` | `to` = `"self"`, `aci:<uuid>` or `group:<id>`; returns devices reached, sealed-sender use, sync result, safety-number changes |
+| `sendText(to, body, files?, extras?)` | `to` = `"self"`, `aci:<uuid>` or `group:<id>`; `files` = forwarded attachments (`{ref}`), text or base64; `extras` = `replyTo` / `reaction` by a stored message's sentAt; `@[aci:<uuid>]` in group text is a mention. Returns devices reached, sealed-sender and sender-key use, sync result, safety-number changes |
 | `notifySelf(body)` | Note to Self that isn't stored or logged (for one-time codes) |
 | `messages(limit, chat?)`, `conversations()`, `chats()` | stored history; chats include known groups and contact names |
 | `syncDirectory()`, `contacts()`, `groups()`, `group(id, refresh?)`, `names()` | contacts and groups (no keys in the output) |
@@ -128,7 +132,7 @@ The building blocks are exported too (`signalFetch`, `SignalSocket`, `ProtocolSt
 
 ## Storage
 
-The client owns these tables: `kv`, `failed_envelopes`, `prekeys`, `signed_prekeys`, `kyber_prekeys`, `kyber_usage`, `sessions`, `sender_keys`, `key_counters`, `messages`, `groups`, `contacts`, `send_log`, `seen_envelopes`, `identities`. Your app can keep its own tables in the same database. Don't reuse these names, except to add your own keys to `kv`. Table names, column layouts and encryption labels are kept compatible with signal-mcp-worker, so an account linked there keeps working.
+The client owns these tables (`SIGNAL_TABLES`): `kv`, `failed_envelopes`, `prekeys`, `signed_prekeys`, `kyber_prekeys`, `kyber_usage`, `sessions`, `sender_keys`, `key_counters`, `messages`, `groups`, `contacts`, `send_log`, `seen_envelopes`, `chat_timers`, `sender_key_shares`, `counters`, `last_errors`, `identities`. Your app can keep its own tables in the same database. Don't reuse these names, except to add your own keys to `kv`. Table names, column layouts and encryption labels are kept compatible with signal-mcp-worker, so an account linked there keeps working.
 
 ## Development
 

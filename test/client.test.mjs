@@ -47,6 +47,6 @@ test("linking refuses a missing or short storage key before touching the network
 test("sending needs a linked account and checks input first", async () => {
 	const client = new SignalClient({ db: memoryDb(), storageKey: TEST_STORAGE_KEY });
 	await assert.rejects(client.sendText("self", "  "), /empty message/);
-	await assert.rejects(client.sendText("self", "x".repeat(2001)), /longer than 2000 bytes/);
+	await assert.rejects(client.sendText("self", "hi", [], { reaction: { emoji: "👍", targetSentAt: 1 } }), /reaction is sent on its own/);
 	await assert.rejects(client.sendText("self", "hi"), /not linked/);
 });

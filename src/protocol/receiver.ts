@@ -95,7 +95,7 @@ export async function receiveEnvelope(
 	let parsed = parseContent(plaintext, sender, device, self.aci, sealedGroupId);
 	// PlaintextContent isn't end-to-end authenticated: as Desktop, use only its DecryptionErrorMessage.
 	if (type === CIPHERTEXT.PLAINTEXT) {
-		parsed = { records: [], decryptionError: parsed.decryptionError, kinds: parsed.decryptionError ? ["decryption-error"] : ["plaintext:ignored"], groups: [] };
+		parsed = { records: [], decryptionError: parsed.decryptionError, kinds: parsed.decryptionError ? ["decryption-error"] : ["plaintext:ignored"], groups: [], timers: [] };
 	}
 	if (parsed.senderKeyDistribution) {
 		const aci = stores.aci!;

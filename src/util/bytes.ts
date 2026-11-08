@@ -82,3 +82,16 @@ export class ByteQueue {
 		void this.#reader.cancel().catch(() => {});
 	}
 }
+
+/**
+ * Constant-time comparison. Uses Workers' `crypto.subtle.timingSafeEqual` where it exists; elsewhere
+ * an XOR fold. Unequal lengths are simply unequal.
+ */
+export function timingSafeEqual(a: Uint8Array, b: Uint8Array): boolean {
+	if (a.length !== b.length) return false;
+	const subtle = crypto.subtle as SubtleCrypto & { timingSafeEqual?: (a: ArrayBufferView, b: ArrayBufferView) => boolean };
+	if (typeof subtle.timingSafeEqual === "function") return subtle.timingSafeEqual(a, b);
+	let diff = 0;
+	for (let i = 0; i < a.length; i++) diff |= a[i]! ^ b[i]!;
+	return diff === 0;
+}

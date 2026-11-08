@@ -1,6 +1,6 @@
 # CLAUDE.md: context for working on signal-edge
 
-A Signal linked-device client library, Workers first, runtime-pluggable. Extracted on 2026-11-04 from FacePlant101/signal-mcp-worker (commit 44c0674), which is its main user and the place where things get verified against a real account. See README.md for the layers and API.
+A Signal linked-device client library, Workers first, runtime-pluggable. Extracted from FacePlant101/signal-mcp-worker (synced with its main at c4bd3d2, PR #16, on 2026-11-08), which is its main user and the place where things get verified against a real account. See README.md for the layers and API.
 
 ## Layout
 - `src/client.ts` `SignalClient`: the account (linking, receive loop, sending, directory, retries, keys). No host APIs: storage is `SqlDatabase` (src/sql.ts); background work, scheduling and new-message notification are options (`waitUntil`, `scheduleMaintenance`, `onMessages`).
@@ -19,6 +19,7 @@ A Signal linked-device client library, Workers first, runtime-pluggable. Extract
 
 ## Gotchas (from the signal-mcp-worker spike, still true)
 - wasm-bindgen objects may be consumed when passed by value: create a fresh `WasmProtocolAddress` per call.
+- Workers-only APIs (`crypto.subtle.timingSafeEqual`, …) don't belong in the core; use the helpers in `src/util/bytes.ts`. `npm test` runs the core in Node and catches them.
 - signal-wasm 0.6.6 reports every libsignal failure as `SignalError: Operation failed`; test behaviour, not error text. Its `WasmInMemIdentityKeyStore` can't be exported and rejects a changed key it has cached, hence our `identities` table and `ProtocolStore.resetIdentityStore()`.
 - Kyber one-time keys must be tombstoned after use (`afterDecrypt`), and `export_kyber_usage`/`import_kyber_usage` carries the anti-replay set.
 - `chat.signal.org`, `storage.signal.org` and the CDNs present Signal-CA certificates (Ed25519 leaf, TLS 1.3); `fetch()` on Workers returns 526.

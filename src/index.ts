@@ -14,6 +14,8 @@ export {
 	type DirectorySync,
 	type DirectSendResult,
 	type GroupSendResult,
+	type OutgoingFile,
+	type MessageExtras,
 	type Chat,
 	type GroupInfo,
 } from "./client.js";
@@ -35,11 +37,27 @@ export { IdentityLog, createIdentitySchema, type IdentityCheck } from "./protoco
 export { MessageStore, createMessageSchema, type StoredMessage, type Conversation } from "./protocol/messages.js";
 export { receiveEnvelope, type Self, type ReceiveResult } from "./protocol/receiver.js";
 export { sendToServiceId, dataMessage, contentWithData, contentWithSentTranscript, padMessage, type SendContext, type SendOptions } from "./protocol/sender.js";
-export { decodeEnvelope, parseContent, unpad, ENVELOPE, CIPHERTEXT, type Envelope, type MessageRecord, type Attachment, type ParsedContent } from "./protocol/content.js";
+export {
+	decodeEnvelope,
+	parseContent,
+	unpad,
+	extractMentions,
+	ACI_PATTERN,
+	ENVELOPE,
+	CIPHERTEXT,
+	type Envelope,
+	type MessageRecord,
+	type Attachment,
+	type Mention,
+	type ParsedContent,
+} from "./protocol/content.js";
+export { ChatTimers, createTimerSchema, type Expiry, type TimerSeen } from "./protocol/timers.js";
+export { sendWithSenderKey, senderKeyUsable, SenderKeyShares, createSenderKeySchema } from "./protocol/sender-keys.js";
+export { Counters, createCounterSchema, describeCounters, FEATURE_COUNTERS, type LastingCounter, type LastError } from "./counters.js";
 export { DecryptFailure, SendLog, SeenEnvelopes, createRetrySchema, type FailedMessage } from "./protocol/retry.js";
 export { Directory, createDirectorySchema, groupIdFromMasterKey, fetchGroupState, fetchCredentials, type GroupRecord, type GroupMember, type Contact } from "./protocol/groups.js";
 export { readStorage, STORAGE_HOST, type StorageSnapshot, type StorageContact, type StorageGroup } from "./protocol/storage-service.js";
-export { downloadAttachment, decryptAttachment, type AttachmentPointer } from "./protocol/attachments.js";
+export { downloadAttachment, decryptAttachment, uploadAttachment, attachmentPointer, LONG_TEXT_TYPE, type AttachmentPointer } from "./protocol/attachments.js";
 export { accessKey, unseal, libsignalExtra, CONTENT_HINT } from "./protocol/sealed.js";
 export { signal } from "./protocol/wasm.js";
 export { encode as encodeProto, Decoded as ProtoDecoded } from "./protocol/proto.js";

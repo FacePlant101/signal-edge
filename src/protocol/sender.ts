@@ -13,8 +13,10 @@ import { encode } from "./proto.js";
 import { CHAT_HOST } from "./socket.js";
 import type { IdentityLog } from "./identities.js";
 import type { SendLog } from "./retry.js";
+import type { Expiry } from "./timers.js";
 import { libsignalExtra } from "./sealed.js";
 import type { ProtocolStore } from "./store.js";
+import type { Mention } from "./content.js";
 import { signal } from "./wasm.js";
 
 const ENVELOPE_DOUBLE_RATCHET = 1;
@@ -40,10 +42,44 @@ export function randomPadding(): Uint8Array {
 	return randomBytes(n);
 }
 
-/** DataMessage { body, profileKey, timestamp, groupV2 { masterKey, revision } }. */
-export function dataMessage(body: string, timestamp: number, profileKey?: Uint8Array, group?: { masterKey: Uint8Array; revision: number }): Uint8Array {
+/** DataMessage.Quote: id 1 (the quoted message's sentAt), authorAci 5, text 3, bodyRanges 6. */
+export function quoteMessage(id: number, authorAci: string, text?: string, mentions: Mention[] = []): Uint8Array {
+	return encode([[1, id], [5, authorAci], [3, text], ...mentions.map((m): [number, Uint8Array] => [6, bodyRange(m)])]);
+}
+
+/** BodyRange for a mention: start 1, length 2, mentionAci 3 (UTF-16 code units, as Signal's apps count). */
+export function bodyRange(m: Mention): Uint8Array {
+	return encode([[1, m.start], [2, m.length], [3, m.aci]]);
+}
+
+/** DataMessage.Reaction: emoji 1, remove 2, targetAuthorAci 4, targetSentTimestamp 5. */
+export function reactionMessage(emoji: string, targetAuthorAci: string, targetSentAt: number, remove = false): Uint8Array {
+	return encode([[1, emoji], [2, remove || undefined], [4, targetAuthorAci], [5, targetSentAt]]);
+}
+
+/** DataMessage { body, attachments[], expireTimer, profileKey, timestamp, groupV2 { masterKey, revision }, expireTimerVersion }. */
+export function dataMessage(
+	body: string | undefined,
+	timestamp: number,
+	profileKey?: Uint8Array,
+	group?: { masterKey: Uint8Array; revision: number },
+	attachments: Uint8Array[] = [],
+	expiry: Expiry = {},
+	extras: { quote?: Uint8Array; reaction?: Uint8Array; mentions?: Mention[] } = {},
+): Uint8Array {
 	const groupV2 = group && encode([[1, group.masterKey], [2, group.revision]]);
-	return encode([[1, body], [6, profileKey], [7, timestamp], [15, groupV2]]);
+	return encode([
+		[1, body || undefined],
+		...attachments.map((p): [number, Uint8Array] => [2, p]),
+		[5, expiry.expireTimer || undefined],
+		[6, profileKey],
+		[7, timestamp],
+		[8, extras.quote],
+		[15, groupV2],
+		[16, extras.reaction],
+		...(extras.mentions ?? []).map((m): [number, Uint8Array] => [18, bodyRange(m)]),
+		[23, expiry.version], // 0 is written: "don't change the timer"
+	]);
 }
 
 export function contentWithData(data: Uint8Array): Uint8Array {
@@ -86,6 +122,8 @@ export type SendContext = {
 	sealedTo?: string[];
 	/** Called when the server refuses an access key with 401/403 (the send then goes authenticated). */
 	onAccessKeyRefused?: (serviceId: string, accessKey: Uint8Array) => void;
+	/** Why a send to someone else went authenticated (for counters); not called for sends to ourselves. */
+	onUnsealed?: (serviceId: string, reason: "no access key" | "no certificate" | "no identity key") => void;
 };
 
 export type SendOptions = {
@@ -101,6 +139,108 @@ export type SendOptions = {
 };
 
 /**
+ * GET /v2/keys/{serviceId}/{device} and builds a session per device returned (not our own device),
+ * checking and recording the identity key. With an access key the fetch is unidentified (as Desktop),
+ * so the server can't tie us to the recipient; "refused" means it was refused and the fetch was done
+ * with our credentials instead.
+ */
+export async function fetchKeys(ctx: SendContext, serviceId: string, device: number | "*", accessKey?: Uint8Array): Promise<"refused" | undefined> {
+	const sig = signal();
+	const { store } = ctx;
+	const isSelf = serviceId === ctx.ourAci;
+	const addr = (d: number) => new sig.WasmProtocolAddress(serviceId, d);
+	const local = () => new sig.WasmProtocolAddress(ctx.ourAci, ctx.ourDeviceId);
+	const path = `/v2/keys/${serviceId}/${device}`;
+	let refused: "refused" | undefined;
+	let res = accessKey ? await signalFetch(CHAT_HOST, "GET", path, { headers: { "Unidentified-Access-Key": toBase64(accessKey) } }) : undefined;
+	if (res && (res.status === 401 || res.status === 403)) {
+		refused = "refused";
+		res = undefined;
+	}
+	res ??= await signalFetch(CHAT_HOST, "GET", path, { headers: { Authorization: ctx.auth } });
+	if (res.status === 404) return refused; // no such device (or account); the server's 409 will tell
+	if (res.status !== 200) throw new Error(`GET /v2/keys/${serviceId}/${device} failed: HTTP ${res.status}`);
+	const keys = JSON.parse(dec.decode(res.body)) as KeysResponse;
+	const identityKey = fromBase64(keys.identityKey);
+	const check = await ctx.identities.check(serviceId, identityKey);
+	if (check === "changed") store.resetIdentityStore(); // else libsignal rejects the new key until restart
+	for (const d of keys.devices) {
+		if (isSelf && d.deviceId === ctx.ourDeviceId) continue;
+		if (!d.signedPreKey || !d.pqPreKey) throw new Error(`device ${d.deviceId} of ${serviceId} has no signed or Kyber prekey`);
+		await sig.processPreKeyBundle(
+			addr(d.deviceId),
+			local(),
+			d.registrationId,
+			sig.WasmPublicKey.deserialize(identityKey),
+			d.signedPreKey.keyId,
+			sig.WasmPublicKey.deserialize(fromBase64(d.signedPreKey.publicKey)),
+			fromBase64(d.signedPreKey.signature),
+			d.preKey?.keyId,
+			d.preKey ? fromBase64(d.preKey.publicKey) : undefined,
+			d.pqPreKey.keyId,
+			fromBase64(d.pqPreKey.publicKey),
+			fromBase64(d.pqPreKey.signature),
+			store.sessions,
+			store.identityStore,
+		);
+		await store.saveSession(serviceId, d.deviceId);
+	}
+	if (check !== "same") await ctx.identities.save(serviceId, identityKey);
+	if (check === "changed") (ctx.identityChanges ??= []).push(serviceId);
+	return refused;
+}
+
+/** Device lists from a 409 (mismatched) or 410 (stale) answer to a send. */
+export type DeviceMismatch = { missingDevices?: number[]; extraDevices?: number[]; staleDevices?: number[] };
+
+/**
+ * Desktop handleMismatchedDevicesError / handleStaleDevicesError: on 409 drop the extra devices'
+ * sessions and fetch keys for the missing ones; on 410 archive the stale sessions and fetch new keys.
+ */
+export async function repairDevices(store: ProtocolStore, serviceId: string, status: 409 | 410, m: DeviceMismatch, fetch: (device: number) => Promise<void>): Promise<void> {
+	const sig = signal();
+	const addr = (d: number) => new sig.WasmProtocolAddress(serviceId, d);
+	if (status === 409) {
+		for (const d of m.extraDevices ?? []) {
+			await store.sessions.delete_session(addr(d));
+			await store.saveSession(serviceId, d);
+		}
+		for (const d of m.missingDevices ?? []) await fetch(d);
+		return;
+	}
+	for (const d of m.staleDevices ?? []) {
+		await store.sessions.archive_session(addr(d));
+		await store.saveSession(serviceId, d);
+		await fetch(d);
+	}
+}
+
+/**
+ * The recorded identity key for `serviceId`, else the one in our session with one of `devices`:
+ * sessions made before identity keys were recorded still carry the key libsignal trusted for them.
+ * A key found that way is recorded (as if first seen), so later sends and checks have it.
+ */
+export async function identityFor(ctx: SendContext, serviceId: string, devices: number[]): Promise<Uint8Array | undefined> {
+	const recorded = await ctx.identities.get(serviceId);
+	if (recorded) return recorded;
+	const sig = signal();
+	for (const device of devices) {
+		const record = await ctx.store.sessions.export_session(new sig.WasmProtocolAddress(serviceId, device));
+		if (!record) continue;
+		let key: Uint8Array | undefined;
+		try {
+			key = libsignalExtra().session_remote_identity(record);
+		} catch {
+			continue;
+		}
+		if (key?.length !== 33) continue;
+		await ctx.identities.save(serviceId, key);
+		return key;
+	}
+	return undefined;
+}
+
+/**
  * Encrypts `content` for every device of `serviceId` (minus our own device when sending to
  * ourselves) and delivers it, repairing the device list on 409/410 as Desktop does.
  * Returns the device ids it was delivered to.
@@ -114,50 +254,17 @@ export async function sendToServiceId(ctx: SendContext, serviceId: string, conte
 	const local = () => new sig.WasmProtocolAddress(ctx.ourAci, ctx.ourDeviceId);
 
 	const processKeys = async (device: number | "*") => {
-		// For a sealed send, fetch with the access key too (as Desktop), or the server could tie us to the
-		// recipient through the key fetch; a refused key falls back to our credentials.
-		const path = `/v2/keys/${serviceId}/${device}`;
-		let res = wantSealed ? await signalFetch(CHAT_HOST, "GET", path, { headers: { "Unidentified-Access-Key": toBase64(opts.accessKey!) } }) : undefined;
-		if (res && (res.status === 401 || res.status === 403)) {
+		if ((await fetchKeys(ctx, serviceId, device, wantSealed ? opts.accessKey : undefined)) === "refused") {
 			// The same key would be refused for the PUT too: this send goes authenticated.
 			ctx.onAccessKeyRefused?.(serviceId, opts.accessKey!);
 			wantSealed = false;
-			res = undefined;
 		}
-		res ??= await signalFetch(CHAT_HOST, "GET", path, { headers: { Authorization: ctx.auth } });
-		if (res.status === 404) return; // no such device (or account); the server's 409 will tell
-		if (res.status !== 200) throw new Error(`GET /v2/keys/${serviceId}/${device} failed: HTTP ${res.status}`);
-		const keys = JSON.parse(dec.decode(res.body)) as KeysResponse;
-		const identityKey = fromBase64(keys.identityKey);
-		const check = await ctx.identities.check(serviceId, identityKey);
-		if (check === "changed") store.resetIdentityStore(); // else libsignal rejects the new key until restart
-		for (const d of keys.devices) {
-			if (isSelf && d.deviceId === ctx.ourDeviceId) continue;
-			if (!d.signedPreKey || !d.pqPreKey) throw new Error(`device ${d.deviceId} of ${serviceId} has no signed or Kyber prekey`);
-			await sig.processPreKeyBundle(
-				addr(d.deviceId),
-				local(),
-				d.registrationId,
-				sig.WasmPublicKey.deserialize(identityKey),
-				d.signedPreKey.keyId,
-				sig.WasmPublicKey.deserialize(fromBase64(d.signedPreKey.publicKey)),
-				fromBase64(d.signedPreKey.signature),
-				d.preKey?.keyId,
-				d.preKey ? fromBase64(d.preKey.publicKey) : undefined,
-				d.pqPreKey.keyId,
-				fromBase64(d.pqPreKey.publicKey),
-				fromBase64(d.pqPreKey.signature),
-				store.sessions,
-				store.identityStore,
-			);
-			await store.saveSession(serviceId, d.deviceId);
-		}
-		if (check !== "same") await ctx.identities.save(serviceId, identityKey);
-		if (check === "changed") (ctx.identityChanges ??= []).push(serviceId);
 	};
 
 	// Never sealed to ourselves: our own devices know who we are. Plaintext (retry requests) is sealed too.
 	let wantSealed = !!(opts.accessKey && ctx.sealedSender && !isSelf);
+	if (!isSelf && !wantSealed) ctx.onUnsealed?.(serviceId, !opts.accessKey ? "no access key" : "no certificate");
+	let reportedNoIdentity = false;
 
 	let devices = (await store.sessionDevices(serviceId)).filter((d) => !(isSelf && d === ctx.ourDeviceId));
 	if (!devices.length) {
@@ -168,8 +275,12 @@ export async function sendToServiceId(ctx: SendContext, serviceId: string, conte
 	for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
 		// Read each attempt: a key fetch in the previous one may have recorded a changed key.
 		// None recorded (e.g. a session from before identities were recorded): this attempt goes authenticated.
-		const theirIdentity = wantSealed ? await ctx.identities.get(serviceId) : undefined;
+		const theirIdentity = wantSealed ? await identityFor(ctx, serviceId, devices) : undefined;
 		const sealed = !!theirIdentity;
+		if (wantSealed && !sealed && !reportedNoIdentity) {
+			ctx.onUnsealed?.(serviceId, "no identity key");
+			reportedNoIdentity = true;
+		}
 		const messages = [];
 		let sealFailed = false;
 		for (const device of devices) {
@@ -227,7 +338,7 @@ export async function sendToServiceId(ctx: SendContext, serviceId: string, conte
 
 		const err = (() => {
 			try {
-				return JSON.parse(dec.decode(res.body)) as { missingDevices?: number[]; extraDevices?: number[]; staleDevices?: number[] };
+				return JSON.parse(dec.decode(res.body)) as DeviceMismatch;
 			} catch {
 				return {};
 			}
@@ -239,18 +350,8 @@ export async function sendToServiceId(ctx: SendContext, serviceId: string, conte
 			attempt--;
 			continue;
 		}
-		if (res.status === 409) {
-			for (const d of err.extraDevices ?? []) {
-				await store.sessions.delete_session(addr(d));
-				await store.saveSession(serviceId, d);
-			}
-			for (const d of err.missingDevices ?? []) await processKeys(d);
-		} else if (res.status === 410) {
-			for (const d of err.staleDevices ?? []) {
-				await store.sessions.archive_session(addr(d));
-				await store.saveSession(serviceId, d);
-				await processKeys(d);
-			}
+		if (res.status === 409 || res.status === 410) {
+			await repairDevices(store, serviceId, res.status, err, processKeys);
 		} else {
 			throw new Error(`PUT /v1/messages/${serviceId} failed: HTTP ${res.status} ${dec.decode(res.body).slice(0, 300)}`);
 		}

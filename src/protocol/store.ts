@@ -2,9 +2,9 @@
 // written back to SQLite (SqlDatabase). Every record is sealed (AES-GCM) with
 // an AAD naming its table and key.
 
+import type { SqlDatabase } from "../sql.js";
 import type * as Sig from "@getmaapp/signal-wasm";
 import type { Sealer } from "../util/sealer.js";
-import type { SqlDatabase } from "../sql.js";
 import { toBase64 } from "../util/bytes.js";
 import { signal } from "./wasm.js";
 

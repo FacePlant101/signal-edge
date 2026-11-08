@@ -376,6 +376,54 @@ export function group_params(master_key) {
 }
 
 /**
+ * Expiration of the endorsements in a response, in epoch seconds.
+ * @param {Uint8Array | number[]} response
+ * @returns {number}
+ */
+export function group_send_endorsements_expiration(response) {
+    const ptr0 = passArray8ToWasm0(response, wasm.__wbindgen_malloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ret = wasm.group_send_endorsements_expiration(ptr0, len0);
+    if (ret[2]) {
+        throw takeFromExternrefTable0(ret[1]);
+    }
+    return ret[0];
+}
+
+/**
+ * `Group-Send-Token` for a set of recipients: their endorsements (`count` of them, back to back, as
+ * stored from `receive_group_send_endorsements`) combined, turned into a token for this group and
+ * bound to the response's expiration (Desktop `GroupSendEndorsementState.buildToken`).
+ * @param {Uint8Array | number[]} endorsements
+ * @param {number} count
+ * @param {Uint8Array | number[]} group_secret_params
+ * @param {number} expiration_seconds
+ * @returns {Uint8Array}
+ */
+export function group_send_full_token(endorsements, count, group_secret_params, expiration_seconds) {
+    const val3 = +count;
+    const val4 = +expiration_seconds;
+    let ptr0, len0, ptr1, len1;
+    try {
+        ptr0 = passArray8ToWasm0(endorsements, wasm.__wbindgen_malloc);
+        len0 = WASM_VECTOR_LEN;
+        ptr1 = passArray8ToWasm0(group_secret_params, wasm.__wbindgen_malloc);
+        len1 = WASM_VECTOR_LEN;
+    } catch (e) {
+        if (ptr1) { wasm.__wbindgen_free(ptr1, len1 * 1, 1); }
+        if (ptr0) { wasm.__wbindgen_free(ptr0, len0 * 1, 1); }
+        throw e;
+    }
+    const ret = wasm.group_send_full_token(ptr0, len0, val3, ptr1, len1, val4);
+    if (ret[3]) {
+        throw takeFromExternrefTable0(ret[2]);
+    }
+    var v5 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
+    wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
+    return v5;
+}
+
+/**
  * Master key (SVR key) from the account entropy pool, as Desktop `deriveMasterKey`.
  * @param {string} pool
  * @returns {Uint8Array}
@@ -422,6 +470,45 @@ export function receive_auth_credential(server_public_params, aci, pni, redempti
         throw e;
     }
     const ret = wasm.receive_auth_credential(ptr0, len0, ptr1, len1, ptr2, len2, val5, ptr3, len3);
+    if (ret[3]) {
+        throw takeFromExternrefTable0(ret[2]);
+    }
+    var v6 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
+    wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
+    return v6;
+}
+
+/**
+ * Verifies `GroupResponse.group_send_endorsements_response` for the group's full member list
+ * (`member_acis`, our own ACI included, as Desktop `receiveWithServiceIds`) and returns one
+ * serialized endorsement per member, in that order, back to back.
+ * @param {Uint8Array | number[]} response
+ * @param {string[]} member_acis
+ * @param {number} now_seconds
+ * @param {Uint8Array | number[]} group_secret_params
+ * @param {Uint8Array | number[]} server_public_params
+ * @returns {Uint8Array}
+ */
+export function receive_group_send_endorsements(response, member_acis, now_seconds, group_secret_params, server_public_params) {
+    const val5 = +now_seconds;
+    let ptr0, len0, ptr1, len1, ptr2, len2, ptr3, len3;
+    try {
+        ptr0 = passArray8ToWasm0(response, wasm.__wbindgen_malloc);
+        len0 = WASM_VECTOR_LEN;
+        ptr1 = passArrayJsValueToWasm0(member_acis, wasm.__wbindgen_malloc);
+        len1 = WASM_VECTOR_LEN;
+        ptr2 = passArray8ToWasm0(group_secret_params, wasm.__wbindgen_malloc);
+        len2 = WASM_VECTOR_LEN;
+        ptr3 = passArray8ToWasm0(server_public_params, wasm.__wbindgen_malloc);
+        len3 = WASM_VECTOR_LEN;
+    } catch (e) {
+        if (ptr3) { wasm.__wbindgen_free(ptr3, len3 * 1, 1); }
+        if (ptr2) { wasm.__wbindgen_free(ptr2, len2 * 1, 1); }
+        if (ptr1) { wasm.__externref_drop_slice(ptr1, len1); wasm.__wbindgen_free(ptr1, len1 * 4, 4); }
+        if (ptr0) { wasm.__wbindgen_free(ptr0, len0 * 1, 1); }
+        throw e;
+    }
+    const ret = wasm.receive_group_send_endorsements(ptr0, len0, ptr1, len1, val5, ptr2, len2, ptr3, len3);
     if (ret[3]) {
         throw takeFromExternrefTable0(ret[2]);
     }
@@ -483,6 +570,67 @@ export function seal(destination_aci, destination_device, destination_identity_k
 }
 
 /**
+ * Sealed sender v2 for a group message (libsignal `sealed_sender_multi_recipient_encrypt`): one
+ * `SenderKeyMessage` sealed for every recipient device, as the body of `PUT /v1/messages/multi_recipient`.
+ * Destinations come as parallel lists, `names[i]`.`devices[i]`, grouped by name; `identity_keys` holds
+ * each destination's 33-byte identity key in the same order, and `sessions` their serialized
+ * SessionRecords back to back (`session_lens[i]` bytes each; the session supplies the registration id).
+ * @param {string[]} names
+ * @param {Uint32Array | number[]} devices
+ * @param {Uint8Array | number[]} identity_keys
+ * @param {Uint8Array | number[]} sessions
+ * @param {Uint32Array | number[]} session_lens
+ * @param {Uint8Array | number[]} identity_key_pair
+ * @param {Uint8Array | number[]} sender_certificate
+ * @param {Uint8Array | number[]} sender_key_message
+ * @param {number} content_hint
+ * @param {Uint8Array | number[] | null} [group_id]
+ * @returns {Uint8Array}
+ */
+export function seal_multi_recipient(names, devices, identity_keys, sessions, session_lens, identity_key_pair, sender_certificate, sender_key_message, content_hint, group_id) {
+    const val10 = +content_hint;
+    let ptr0, len0, ptr1, len1, ptr2, len2, ptr3, len3, ptr4, len4, ptr5, len5, ptr6, len6, ptr7, len7, ptr8, len8;
+    try {
+        ptr0 = passArrayJsValueToWasm0(names, wasm.__wbindgen_malloc);
+        len0 = WASM_VECTOR_LEN;
+        ptr1 = passArray32ToWasm0(devices, wasm.__wbindgen_malloc);
+        len1 = WASM_VECTOR_LEN;
+        ptr2 = passArray8ToWasm0(identity_keys, wasm.__wbindgen_malloc);
+        len2 = WASM_VECTOR_LEN;
+        ptr3 = passArray8ToWasm0(sessions, wasm.__wbindgen_malloc);
+        len3 = WASM_VECTOR_LEN;
+        ptr4 = passArray32ToWasm0(session_lens, wasm.__wbindgen_malloc);
+        len4 = WASM_VECTOR_LEN;
+        ptr5 = passArray8ToWasm0(identity_key_pair, wasm.__wbindgen_malloc);
+        len5 = WASM_VECTOR_LEN;
+        ptr6 = passArray8ToWasm0(sender_certificate, wasm.__wbindgen_malloc);
+        len6 = WASM_VECTOR_LEN;
+        ptr7 = passArray8ToWasm0(sender_key_message, wasm.__wbindgen_malloc);
+        len7 = WASM_VECTOR_LEN;
+        ptr8 = isLikeNone(group_id) ? 0 : passArray8ToWasm0(group_id, wasm.__wbindgen_malloc);
+        len8 = WASM_VECTOR_LEN;
+    } catch (e) {
+        if (ptr8) { wasm.__wbindgen_free(ptr8, len8 * 1, 1); }
+        if (ptr7) { wasm.__wbindgen_free(ptr7, len7 * 1, 1); }
+        if (ptr6) { wasm.__wbindgen_free(ptr6, len6 * 1, 1); }
+        if (ptr5) { wasm.__wbindgen_free(ptr5, len5 * 1, 1); }
+        if (ptr4) { wasm.__wbindgen_free(ptr4, len4 * 4, 4); }
+        if (ptr3) { wasm.__wbindgen_free(ptr3, len3 * 1, 1); }
+        if (ptr2) { wasm.__wbindgen_free(ptr2, len2 * 1, 1); }
+        if (ptr1) { wasm.__wbindgen_free(ptr1, len1 * 4, 4); }
+        if (ptr0) { wasm.__externref_drop_slice(ptr0, len0); wasm.__wbindgen_free(ptr0, len0 * 4, 4); }
+        throw e;
+    }
+    const ret = wasm.seal_multi_recipient(ptr0, len0, ptr1, len1, ptr2, len2, ptr3, len3, ptr4, len4, ptr5, len5, ptr6, len6, ptr7, len7, val10, ptr8, len8);
+    if (ret[3]) {
+        throw takeFromExternrefTable0(ret[2]);
+    }
+    var v11 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
+    wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
+    return v11;
+}
+
+/**
  * Expiry of a sender certificate, in epoch milliseconds (refetch before it passes).
  * @param {Uint8Array | number[]} sender_certificate
  * @returns {number}
@@ -495,6 +643,28 @@ export function sender_certificate_expiration(sender_certificate) {
         throw takeFromExternrefTable0(ret[1]);
     }
     return ret[0];
+}
+
+/**
+ * The other side's identity key (33 bytes) from a serialized session record, or None when the
+ * record has no current session. Sessions made before we recorded identity keys still carry the
+ * key libsignal trusted for them, so a sealed send can use it.
+ * @param {Uint8Array | number[]} session
+ * @returns {Uint8Array | undefined}
+ */
+export function session_remote_identity(session) {
+    const ptr0 = passArray8ToWasm0(session, wasm.__wbindgen_malloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ret = wasm.session_remote_identity(ptr0, len0);
+    if (ret[3]) {
+        throw takeFromExternrefTable0(ret[2]);
+    }
+    let v2;
+    if (ret[0] !== 0) {
+        v2 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
+        wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
+    }
+    return v2;
 }
 
 /**
@@ -603,12 +773,58 @@ export function unseal_for_test(ciphertext, identity_key_pair, timestamp_ms, loc
     }
     return Unsealed.__wrap(ret[0]);
 }
+
+/**
+ * For the receiver self-test: opens one recipient's part of a multi-recipient message the way the
+ * server and the recipient do (libsignal `SealedSenderV2SentMessage` + `sealed_sender_decrypt_to_usmc`).
+ * @param {Uint8Array | number[]} sent
+ * @param {string} recipient_aci
+ * @param {number} recipient_device
+ * @param {Uint8Array | number[]} identity_key_pair
+ * @param {number} timestamp_ms
+ * @param {Uint8Array | number[]} trust_root_public
+ * @returns {Unsealed}
+ */
+export function unseal_multi_recipient_for_test(sent, recipient_aci, recipient_device, identity_key_pair, timestamp_ms, trust_root_public) {
+    const val5 = +recipient_device;
+    const val6 = +timestamp_ms;
+    let ptr0, len0, ptr1, len1, ptr2, len2, ptr3, len3;
+    try {
+        ptr0 = passArray8ToWasm0(sent, wasm.__wbindgen_malloc);
+        len0 = WASM_VECTOR_LEN;
+        ptr1 = passStringToWasm0(recipient_aci, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        len1 = WASM_VECTOR_LEN;
+        ptr2 = passArray8ToWasm0(identity_key_pair, wasm.__wbindgen_malloc);
+        len2 = WASM_VECTOR_LEN;
+        ptr3 = passArray8ToWasm0(trust_root_public, wasm.__wbindgen_malloc);
+        len3 = WASM_VECTOR_LEN;
+    } catch (e) {
+        if (ptr3) { wasm.__wbindgen_free(ptr3, len3 * 1, 1); }
+        if (ptr2) { wasm.__wbindgen_free(ptr2, len2 * 1, 1); }
+        if (ptr1) { wasm.__wbindgen_free(ptr1, len1 * 1, 1); }
+        if (ptr0) { wasm.__wbindgen_free(ptr0, len0 * 1, 1); }
+        throw e;
+    }
+    const ret = wasm.unseal_multi_recipient_for_test(ptr0, len0, ptr1, len1, val5, ptr2, len2, val6, ptr3, len3);
+    if (ret[2]) {
+        throw takeFromExternrefTable0(ret[1]);
+    }
+    return Unsealed.__wrap(ret[0]);
+}
 function __wbg_get_imports() {
     const import0 = {
         __proto__: null,
         __wbg_Error_208446807d0d1e30: function(arg0, arg1) {
             const ret = Error(getStringFromWasm0(arg0, arg1));
             return ret;
+        },
+        __wbg___wbindgen_string_get_7ce8eee7fd327545: function(arg0, arg1) {
+            const obj = arg1;
+            const ret = typeof(obj) === 'string' ? obj : undefined;
+            var ptr1 = isLikeNone(ret) ? 0 : passStringToWasm0(ret, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+            var len1 = WASM_VECTOR_LEN;
+            getDataViewMemory0().setInt32((arg0 >>> 0) + 4 * 1, len1, true);
+            getDataViewMemory0().setInt32((arg0 >>> 0) + 4 * 0, ptr1, true);
         },
         __wbg___wbindgen_throw_4c88d8bf264fd984: function(arg0, arg1) {
             throw new Error(getStringFromWasm0(arg0, arg1));
@@ -649,9 +865,25 @@ function getArrayU8FromWasm0(ptr, len) {
     return getUint8ArrayMemory0().subarray(ptr / 1, ptr / 1 + len);
 }
 
+let cachedDataViewMemory0 = null;
+function getDataViewMemory0() {
+    if (cachedDataViewMemory0 === null || cachedDataViewMemory0.buffer.detached === true || (cachedDataViewMemory0.buffer.detached === undefined && cachedDataViewMemory0.buffer !== wasm.memory.buffer)) {
+        cachedDataViewMemory0 = new DataView(wasm.memory.buffer);
+    }
+    return cachedDataViewMemory0;
+}
+
 function getStringFromWasm0(ptr, len) {
     ptr = ptr >>> 0;
     return decodeText(getUint8ArrayMemory0().subarray(ptr, ptr + len));
+}
+
+let cachedUint32ArrayMemory0 = null;
+function getUint32ArrayMemory0() {
+    if (cachedUint32ArrayMemory0 === null || cachedUint32ArrayMemory0.byteLength === 0) {
+        cachedUint32ArrayMemory0 = new Uint32Array(wasm.memory.buffer);
+    }
+    return cachedUint32ArrayMemory0;
 }
 
 let cachedUint8ArrayMemory0 = null;
@@ -675,10 +907,27 @@ function isLikeNone(x) {
     return x === undefined || x === null;
 }
 
+function passArray32ToWasm0(arg, malloc) {
+    const ptr = malloc(arg.length * 4, 4) >>> 0;
+    getUint32ArrayMemory0().set(arg, ptr / 4);
+    WASM_VECTOR_LEN = arg.length;
+    return ptr;
+}
+
 function passArray8ToWasm0(arg, malloc) {
     const ptr = malloc(arg.length * 1, 1) >>> 0;
     getUint8ArrayMemory0().set(arg, ptr / 1);
     WASM_VECTOR_LEN = arg.length;
+    return ptr;
+}
+
+function passArrayJsValueToWasm0(array, malloc) {
+    const ptr = malloc(array.length * 4, 4) >>> 0;
+    for (let i = 0; i < array.length; i++) {
+        const add = addToExternrefTable0(array[i]);
+        getDataViewMemory0().setUint32(ptr + 4 * i, add, true);
+    }
+    WASM_VECTOR_LEN = array.length;
     return ptr;
 }
 
@@ -759,6 +1008,8 @@ function __wbg_finalize_init(instance, module) {
     wasmInstance = instance;
     wasm = instance.exports;
     wasmModule = module;
+    cachedDataViewMemory0 = null;
+    cachedUint32ArrayMemory0 = null;
     cachedUint8ArrayMemory0 = null;
     wasm.__wbindgen_start();
     return wasm;

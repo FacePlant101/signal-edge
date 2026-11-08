@@ -1,8 +1,8 @@
 // Decrypted chat history in DO SQLite. Routing metadata (conversation, author,
 // timestamps) stays queryable; the message itself is sealed JSON.
 
-import { dec, enc } from "../util/bytes.js";
 import type { SqlDatabase } from "../sql.js";
+import { dec, enc } from "../util/bytes.js";
 import type { Sealer } from "../util/sealer.js";
 import type { MessageRecord } from "./content.js";
 
@@ -66,6 +66,28 @@ export class MessageStore {
 		return { ...rec, id: row.id, receivedAt: row.received_at };
 	}
 
+	/** The newest stored message or edit in `conversation` with this timestamp (the id shown to MCP clients). */
+	async findSent(conversation: string, sentAt: number): Promise<StoredMessage | undefined> {
+		const row = this.sql
+			.exec<Row>("SELECT id, conversation, author, sent_at, received_at, kind, data FROM messages WHERE conversation = ? AND sent_at = ? AND kind = 'message' ORDER BY id DESC LIMIT 1", conversation, sentAt)
+			[0];
+		return row && this.get(row.id);
+	}
+
+	/** Replaces the stored record with these routing fields (same seal binding); false if there is none. */
+	async replace(r: MessageRecord): Promise<boolean> {
+		const sealed = await this.sealer.seal(aad(r), enc.encode(JSON.stringify(r)));
+		const rows = this.sql.exec(
+			"UPDATE messages SET data = ? WHERE conversation = ? AND author = ? AND sent_at = ? AND kind = ? RETURNING id",
+			sealed,
+			r.conversation,
+			r.author,
+			r.sentAt,
+			r.kind,
+		);
+		return rows.length > 0;
+	}
+
 	async latest(limit: number, conversation?: string): Promise<StoredMessage[]> {
 		const q = conversation
 			? this.sql.exec<Row>("SELECT id, conversation, author, sent_at, received_at, kind, data FROM messages WHERE conversation = ? ORDER BY sent_at DESC LIMIT ?", conversation, limit)
@@ -84,7 +106,8 @@ export class MessageStore {
 				`SELECT conversation, COUNT(*) AS messages, MAX(sent_at) AS lastSentAt,
 					(SELECT author FROM messages m2 WHERE m2.conversation = m.conversation ORDER BY sent_at DESC LIMIT 1) AS lastAuthor
 				 FROM messages m GROUP BY conversation ORDER BY lastSentAt DESC`,
-			);
+			)
+			;
 	}
 
 	count(): number {

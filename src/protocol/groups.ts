@@ -3,9 +3,9 @@
 // ts/groups.preload.ts (decryptGroupState), ts/textsecure/WebAPI.preload.ts (getGroup) and
 // protos/Groups.proto. zkgroup itself runs in our libsignal build (sealed/src/zk.rs).
 
+import type { SqlDatabase } from "../sql.js";
 import { signalFetch } from "../net/http.js";
 import { dec, enc, fromBase64, toBase64 } from "../util/bytes.js";
-import type { SqlDatabase } from "../sql.js";
 import type { Sealer } from "../util/sealer.js";
 import { Decoded } from "./proto.js";
 import { libsignalExtra } from "./sealed.js";
@@ -40,6 +40,14 @@ export type GroupRecord = {
 	requestingMembers?: number;
 	announcementsOnly?: boolean;
 	terminated?: boolean;
+	/**
+	 * Group send endorsements (GroupResponse field 2), verified for `members` in that order: one
+	 * serialized endorsement per member back to back (base64), valid until `expiration` (epoch
+	 * seconds). They authorize sender-key sends (`Group-Send-Token`); never shown.
+	 */
+	endorsements?: { expiration: number; members: string[]; data: string };
+	/** Disappearing-messages timer in seconds (0 or absent: off), from group state. */
+	disappearingTimer?: number;
 	fetchedAt?: number;
 	fetchError?: string;
 };
@@ -101,7 +109,8 @@ export async function fetchGroupState(masterKey: Uint8Array, credential: Credent
 	if (res.status === 404) throw new GroupFetchError(404, "group not found");
 	if (res.status !== 200) throw new GroupFetchError(res.status, `GET /v2/groups failed: HTTP ${res.status}`);
 
-	const group = new Decoded(new Decoded(res.body).bytes(1) ?? new Uint8Array(0));
+	const response = new Decoded(res.body);
+	const group = new Decoded(response.bytes(1) ?? new Uint8Array(0));
 	const secret = params.secret_params;
 	const blob = (b: Uint8Array | undefined) => {
 		if (!b?.length) return undefined;
@@ -135,6 +144,23 @@ export async function fetchGroupState(masterKey: Uint8Array, credential: Credent
 		}
 		members.push({ aci, admin: m.uint(2) === 2, profileKey });
 	}
+	// Disappearing-messages timer (4): absent means off; an unreadable blob is unknown (undefined), so
+	// a send falls back to the timer seen in messages rather than turning it off.
+	const timerBlob = group.bytes(4);
+	const timer = timerBlob?.length ? blob(timerBlob) : undefined;
+	// Endorsements for every member (us included), checked against the server's key; without them,
+	// group sends fall back to one message per member.
+	let endorsements: GroupRecord["endorsements"];
+	const endorsementResponse = response.bytes(2);
+	if (endorsementResponse?.length && members.length === messages(7).length) {
+		try {
+			const acis = members.map((m) => m.aci);
+			const data = x.receive_group_send_endorsements(endorsementResponse, acis, Math.floor(Date.now() / 1000), secret, SERVER_PUBLIC_PARAMS);
+			endorsements = { expiration: x.group_send_endorsements_expiration(endorsementResponse), members: acis, data: toBase64(data) };
+		} catch (e) {
+			console.warn("group send endorsements didn't verify", e);
+		}
+	}
 	const pendingMembers = messages(8)
 		.map((p) => serviceId(p.bytes(1) && new Decoded(p.bytes(1)!).bytes(1)))
 		.filter((s): s is string => !!s);
@@ -146,7 +172,9 @@ export async function fetchGroupState(masterKey: Uint8Array, credential: Credent
 		pendingMembers,
 		requestingMembers: messages(9).length,
 		announcementsOnly: group.bool(12) ?? false,
+		disappearingTimer: !timerBlob?.length ? 0 : timer ? (timer.uint(3) ?? 0) : undefined,
 		terminated: group.bool(14) ?? false,
+		endorsements,
 		fetchedAt: Date.now(),
 	};
 }

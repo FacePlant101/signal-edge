@@ -292,9 +292,14 @@ export function parseAccountId(input: string): string {
 	return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
 
-/** Signal Login's "Account Key" (its account entropy pool): 64 characters of [0-9a-z]; case, spaces and dashes don't matter. */
+/**
+ * Signal Login's "Account Key" (its account entropy pool): 64 characters of [0-9a-z]. Accepts it as
+ * Signal's app shows it: upper case, grouped, with the letter O written "#" and the digit 0 written "="
+ * (Signal-Android AccountEntropyPool.formatForDisplay); anything else that isn't a letter or digit is
+ * ignored, as the app's own formatForStorage + removeIllegalCharacters do.
+ */
 export function parseAccountKey(input: string): string {
-	const aep = input.trim().replace(/[\s-]/g, "").toLowerCase();
+	const aep = input.replace(/#/g, "o").replace(/=/g, "0").replace(/[^0-9a-zA-Z]/g, "").toLowerCase();
 	if (!/^[0-9a-z]{64}$/.test(aep)) throw new Error("the Account Key has 64 letters and digits");
 	return aep;
 }

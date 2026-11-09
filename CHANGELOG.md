@@ -2,6 +2,10 @@
 
 signal-edge follows [semantic versioning](https://semver.org) for 0.x: a breaking change bumps the minor version.
 
+## 0.4.1
+
+- `parseAccountKey` (and so `loginWithAccountKey`) takes the Account Key as Signal's app shows it: Signal-Android writes the letter O as `#` and the digit 0 as `=` (`AccountEntropyPool.formatForDisplay`), which 0.4.0 refused ("the Account Key has 64 letters and digits"). Anything else that isn't a letter or digit is ignored, as in the app.
+
 ## 0.4.0
 
 - **Signal Login (accounts without a phone number)**: `loginWithAccountKey(accountId, accountKey, { totp? })` makes this device the primary of an existing account, proven with Signal Login's Account ID (the ACI) and Account Key (the account entropy pool) through Signal-Server's recovery by account identifier (`POST /v1/registration` with the registration recovery password). Accounts are registered without a phone number in Signal's Android app (a one-time in-app purchase); this takes such an account over, so a number Signal won't accept is no obstacle. The device that had the account is signed out. The account gets new identity keys and registration ids (contacts see a new safety number); its profile key is restored from the storage service's account record and the server is given its access key. Works for accounts with a phone number too.

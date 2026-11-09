@@ -1,10 +1,10 @@
 # signal-edge
 
-A Signal client that runs as a **linked device** (like Signal Desktop) inside Cloudflare Workers, or any JavaScript runtime that can open a TCP socket and run WebAssembly. It links to an existing Signal account with a QR code, keeps a live connection to Signal, decrypts what arrives, and sends 1:1 and group messages with attachments, quotes, reactions and mentions. No signal-cli, JVM, container or VPS.
+A Signal client that runs as a **linked device** (like Signal Desktop) inside Cloudflare Workers or Node.js, or any JavaScript runtime that can open a TCP socket and run WebAssembly. It links to an existing Signal account with a QR code, keeps a live connection to Signal, decrypts what arrives, and sends 1:1 and group messages with attachments, quotes, reactions and mentions. No signal-cli, JVM, container or VPS.
 
 > **Unofficial.** This is not Signal's software, Signal doesn't support it, and it can break whenever Signal changes its servers. Try it with a spare number first. It handles real end-to-end-encrypted traffic and stores keys that can read it: treat the storage key like a password.
 
-Extracted from [signal-mcp-worker](https://github.com/FacePlant101/signal-mcp-worker) (as of its PR #16), where it runs against a real account.
+Extracted from [signal-mcp-worker](https://github.com/FacePlant101/signal-mcp-worker), which runs on it against a real account (since 2026-11-09).
 
 ## What works
 
@@ -17,11 +17,13 @@ Extracted from [signal-mcp-worker](https://github.com/FacePlant101/signal-mcp-wo
 | Contacts and groups (storage service, zkgroup credentials, group state) | verified on a real account |
 | Attachment download and decryption, long received texts | verified on a real account |
 | Safety-number changes (accepted like the apps do, recorded in the chat) | verified on Workers (self-test) |
-| Sealed-sender sends, retry requests (resend after a failed decrypt) | self-test only; not yet seen by a real recipient |
+| Sealed-sender sends | accepted by Signal on a real account (signal-mcp-worker's replies) |
+| Retry requests (resend after a failed decrypt) | self-test only; not yet seen on a real account |
 | Sending attachments and long texts (long-text attachment past 2000 bytes) | deployed; not yet seen by a real recipient |
 | Sender-key group sends (`multi_recipient`, group send endorsements; falls back to one copy per member) | deployed; not yet run in a group of 3+ |
 | Disappearing-message timers, quoted replies, reactions, mentions | built; not yet seen on real clients |
 | Counters and last errors that survive restarts | built |
+| Node.js (`signal-edge/node`) | unit-tested; CI reaches Signal's servers with it on every run (TLS, provisioning socket); not yet run against an account |
 
 Not there yet: phone-number lookup (CDSI needs SGX attestation, so recipients are ACIs), delivery/read receipts, stories, calls, registering a new primary account.
 
@@ -44,11 +46,11 @@ Everything the client stores (sessions, keys, messages, contacts) is encrypted w
 
 ## Install
 
-From GitHub (the `prepare` script builds `dist/`):
-
 ```sh
-npm install github:FacePlant101/signal-edge
+npm install signal-edge
 ```
+
+Or from GitHub, e.g. to try an unreleased commit (the `prepare` script builds `dist/`): `npm install github:FacePlant101/signal-edge#<commit>`.
 
 The WebAssembly is prebuilt and checked in (`src/vendor/`), so you don't need Rust unless you change `tls/` or `sealed/`.
 
@@ -93,6 +95,28 @@ Things to know on Workers:
 - After a deploy, a Durable Object that stays busy keeps running the old code for up to 5 minutes. To switch at once, deploy with `wrangler versions deploy <id>@100% --durable-objects-code-update-mode immediate`.
 - Signal removes linked devices that stay offline for about 30 days. The receive loop keeps the device active as long as the alarm runs.
 
+## Node.js
+
+Node 22.13 or later. `signal-edge/node` sets up TCP (`node:net`) and the WASM modules, stores everything in a SQLite file, and runs maintenance on a timer:
+
+```js
+import { createNodeClient } from "signal-edge/node";
+
+const { client, shutdown } = createNodeClient({
+	database: "signal.db", // a path (node:sqlite, WAL mode), or an open node:sqlite / better-sqlite3 database
+	storageKey: process.env.SIGNAL_STORAGE_KEY, // 32 random bytes, base64
+	deviceName: "My bot",
+	onMessages: (records) => console.log(records),
+});
+
+const link = await client.startLink(); // { state: "waiting_for_scan", url: "sgnl://linkdevice?…" } → show as QR
+// …once client.status().state === "linked": it connects and stays connected by itself
+await client.sendText("self", "hello from Node");
+process.once("SIGINT", () => shutdown()); // closes the socket and the database
+```
+
+[`examples/node`](examples/node) is a small CLI: `link`, `status`, `listen`, `send`. The building blocks are exported too: `nodeConnect` (a TCP connection as web streams) and `nodeSqlite` (a `SqlDatabase` over node:sqlite or better-sqlite3).
+
 ## Other runtimes
 
 The core (`signal-edge`) uses only web-standard APIs (WebCrypto, streams, `fetch` for CDN redirects). Give it a socket and the WASM:
@@ -107,7 +131,7 @@ configure({
 const client = new SignalClient({ db: mySqliteAdapter, storageKey, scheduleMaintenance: (at) => setTimer(at) });
 ```
 
-The WASM files are `@getmaapp/signal-wasm/signal_wasm_bg.wasm`, `signal-edge/wasm/signal-sealed/signal_sealed_bg.wasm` and `signal-edge/wasm/signal-tls/signal_tls_bg.wasm`. `SqlDatabase` is two methods, `exec(query, ...bindings) → rows` and `transaction(fn)`. [`test/node-host.mjs`](test/node-host.mjs) adapts `node:sqlite` in about 30 lines. The tests run the whole crypto and storage stack in Node this way. A Node TCP adapter (`node:net` to web streams) isn't included yet.
+The WASM files are `@getmaapp/signal-wasm/signal_wasm_bg.wasm`, `signal-edge/wasm/signal-sealed/signal_sealed_bg.wasm` and `signal-edge/wasm/signal-tls/signal_tls_bg.wasm`. `SqlDatabase` is two methods, `exec(query, ...bindings) → rows` and `transaction(fn)`. [`src/node.ts`](src/node.ts) is a complete example of both. Deno's Node compatibility should run `signal-edge/node` as is (untested); Bun would need its own SQLite adapter.
 
 ## API
 
@@ -139,11 +163,12 @@ The client owns these tables (`SIGNAL_TABLES`): `kv`, `failed_envelopes`, `preke
 ```sh
 npm install        # also builds dist/
 npm run typecheck
-npm test           # builds, then runs the self-tests and client tests in Node 22 (node:sqlite)
+npm test           # builds, then runs the unit tests and self-tests in Node (node:sqlite)
+SIGNAL_NETWORK_TESTS=1 npm test   # also connects to Signal's servers (no account); CI does this
 cd examples/worker && npm install && npm run check   # typecheck + wrangler bundle (dry run)
 ```
 
-Rebuilding the WASM (only after changing `tls/` or `sealed/`) needs rustup with the `wasm32-unknown-unknown` target, LLVM clang and llvm-ar, `wasm-bindgen-cli` 0.2.130, and `protoc` for `sealed/`. Then run `npm run build:tls` / `npm run build:sealed` and commit `src/vendor/`. After a change to either `Cargo.lock`, regenerate the license notices with `python3 scripts/third-party-licenses.py` and commit `THIRD_PARTY_LICENSES.txt`.
+Rebuilding the WASM (only after changing `tls/` or `sealed/`) needs rustup with the `wasm32-unknown-unknown` target, LLVM clang and llvm-ar, `wasm-bindgen-cli` 0.2.130, and `protoc` for `sealed/`. Then run `npm run build:tls` / `npm run build:sealed` and commit `src/vendor/`. Releases: bump `version` in package.json and add to CHANGELOG.md in a PR; after it merges, push the tag `v<version>` and the Release workflow publishes to npm. After a change to either `Cargo.lock`, regenerate the license notices with `python3 scripts/third-party-licenses.py` and commit `THIRD_PARTY_LICENSES.txt`.
 
 ## Credits
 

@@ -16,8 +16,9 @@ export async function agree(privateKey: Uint8Array, publicKey: Uint8Array): Prom
 	if (publicKey.length !== 33 || publicKey[0] !== DJB_TYPE) throw new Error("agree: expected 33-byte DJB public key");
 	const priv = await subtle.importKey("pkcs8", concat(X25519_PKCS8_PREFIX, privateKey), { name: "X25519" }, false, ["deriveBits"]);
 	const pub = await subtle.importKey("raw", publicKey.subarray(1), { name: "X25519" }, false, []);
-	// The runtime takes the standard `public` member; workers-types names it `$public`.
-	const params = { name: "X25519", public: pub } as unknown as SubtleCryptoDeriveKeyAlgorithm;
+	// The runtime takes the standard `public` member; workers-types names it `$public`, so the
+	// parameter type is taken from deriveBits itself to typecheck under both Workers and DOM types.
+	const params = { name: "X25519", public: pub } as unknown as Parameters<typeof subtle.deriveBits>[0];
 	return new Uint8Array(await subtle.deriveBits(params, priv, 256));
 }
 

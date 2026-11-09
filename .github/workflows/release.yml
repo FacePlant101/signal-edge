@@ -1,7 +1,9 @@
 name: Release
-# Pushing a tag v<version> (matching package.json, on a commit that is on main) publishes that version.
+# Pushing a tag v<version> (matching package.json, on a commit that is on main) stages that version on npm.
 # verify builds and tests the tagged commit and packs it, with a read-only token and no OIDC token;
-# publish only uploads that tarball, running no scripts, with the npm environment's credentials.
+# publish only uploads that tarball, running no scripts, with the npm environment's credentials, as a
+# staged package (npm stage publish): it goes public only once a maintainer approves it with 2FA
+# (npmjs.com, or `npm stage approve <stage-id>`; `npm stage list signal-edge` shows the id).
 on:
   push:
     tags: ["v*"]
@@ -48,11 +50,21 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: package
-      # With a trusted publisher configured on npmjs.com, npm signs in through OIDC. NPM_TOKEN (a granular
-      # token) is only for publishing before that is set up, e.g. the very first release.
-      - name: Publish
+      # npm stage needs npm 11.21 or later; pinned, installed without running scripts.
+      - run: npm install --global --ignore-scripts npm@11.21.2
+      # With a trusted publisher configured on npmjs.com (allow stage publish only), npm signs in through
+      # OIDC. NPM_TOKEN (a granular token without 2FA bypass) is only for before that is set up.
+      - name: Stage for approval
         env:
           NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
+          # A version already on npm (0.2.0 was published by hand, before the trusted publisher could
+          # be set up) is left alone: npm never accepts the same version twice, staged or published.
+          version="${GITHUB_REF_NAME#v}"
+          if [ -n "$(npm view "signal-edge@$version" version 2>/dev/null)" ]; then
+            echo "::notice::signal-edge@$version is already on npm; nothing to publish."
+            exit 0
+          fi
           if [ -n "$NPM_TOKEN" ]; then export NODE_AUTH_TOKEN="$NPM_TOKEN"; fi
-          npm publish ./signal-edge-*.tgz --provenance --access public --ignore-scripts
+          npm stage publish ./signal-edge-*.tgz --provenance --access public --ignore-scripts
+          echo "::notice::signal-edge@$version is staged on npm: approve it with 2FA to publish it."

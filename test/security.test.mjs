@@ -338,6 +338,10 @@ test("Account IDs and Account Keys are read the way the app shows them", async (
 	assert.equal(parseAccountKey(aep.toUpperCase().match(/.{4}/g).join(" ")), aep);
 	assert.equal(parseAccountKey(aep.match(/.{4}/g).join("-")), aep);
 	for (const bad of ["", aep.slice(1), `${aep}x`, `${aep.slice(1)}!`]) assert.throws(() => parseAccountKey(bad), /Account Key/);
+	// As Signal-Android shows it (its own preview value): O as "#", 0 as "=", grouped in fours.
+	const shown = "UY38 JH27 78HJ JHJ8 LK19 GA61 S672 JSJ= 89R= 23S6 A578 =9BA P92J 2YH5 T326 VV7T";
+	assert.equal(parseAccountKey(shown), "uy38jh2778hjjhj8lk19ga61s672jsj089r023s6a57809bap92j2yh5t326vv7t");
+	assert.equal(parseAccountKey("#".repeat(32) + "=".repeat(32)), "o".repeat(32) + "0".repeat(32));
 });
 
 test("the recovery body carries the recovery password instead of a session", async () => {

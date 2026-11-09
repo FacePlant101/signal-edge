@@ -1,6 +1,6 @@
 {
 	"name": "signal-edge",
-	"version": "0.4.0",
+	"version": "0.4.1",
 	"description": "A Signal linked-device client for Cloudflare Workers and Node.js: userland TLS pinned to Signal's CA, libsignal sessions, sealed sender, sender keys, groups, attachments, persistence in SQLite.",
 	"license": "AGPL-3.0-only",
 	"author": "FacePlant101",

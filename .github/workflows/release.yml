@@ -13,14 +13,14 @@ jobs:
   verify:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
       - name: The tag matches package.json and is on main
         run: |
           test "v$(node -p 'require("./package.json").version')" = "$GITHUB_REF_NAME"
           git merge-base --is-ancestor "$GITHUB_SHA" origin/main
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@v7
         with:
           node-version: 24
       - run: npm ci --ignore-scripts
@@ -29,7 +29,7 @@ jobs:
         env:
           SIGNAL_NETWORK_TESTS: "1"
       - run: npm pack
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: package
           path: signal-edge-*.tgz
@@ -42,12 +42,12 @@ jobs:
       contents: read
       id-token: write # npm trusted publishing (OIDC) and provenance
     steps:
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@v7
         with:
           # Node 24 ships npm 11, which trusted publishing needs.
           node-version: 24
           registry-url: https://registry.npmjs.org
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: package
       # npm stage needs npm 11.21 or later; pinned, installed without running scripts.

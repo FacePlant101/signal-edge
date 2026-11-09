@@ -125,6 +125,25 @@ pub fn derive_access_key(profile_key: &[u8]) -> Result<Vec<u8>, JsError> {
     Ok(ProfileKey::create(bytes).derive_access_key().to_vec())
 }
 
+/// Our profile's version for `aci` (64 hex characters): `version` in `PUT /v1/profile` and the
+/// version others fetch (`GET /v1/profile/{aci}/{version}`). Desktop `deriveProfileKeyVersion`.
+#[wasm_bindgen]
+pub fn profile_key_version(profile_key: &[u8], aci: &str) -> Result<String, JsError> {
+    let bytes: [u8; 32] = profile_key.try_into().map_err(|_| JsError::new("profile key must be 32 bytes"))?;
+    let aci = Aci::parse_from_service_id_string(aci).ok_or_else(|| JsError::new("invalid ACI"))?;
+    let version = ProfileKey::create(bytes).get_profile_key_version(aci);
+    Ok(AsRef::<str>::as_ref(&version).to_owned())
+}
+
+/// Serialized ProfileKeyCommitment for `aci`: `commitment` (base64) in `PUT /v1/profile`.
+/// Desktop `deriveProfileKeyCommitment`.
+#[wasm_bindgen]
+pub fn profile_key_commitment(profile_key: &[u8], aci: &str) -> Result<Vec<u8>, JsError> {
+    let bytes: [u8; 32] = profile_key.try_into().map_err(|_| JsError::new("profile key must be 32 bytes"))?;
+    let aci = Aci::parse_from_service_id_string(aci).ok_or_else(|| JsError::new("invalid ACI"))?;
+    Ok(zkgroup::serialize(&ProfileKey::create(bytes).get_commitment(aci)))
+}
+
 /// Master key (SVR key) from the account entropy pool, as Desktop `deriveMasterKey`.
 #[wasm_bindgen]
 pub fn master_key_from_entropy_pool(pool: &str) -> Result<Vec<u8>, JsError> {

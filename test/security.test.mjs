@@ -408,6 +408,56 @@ test("group credentials for an account without a phone number go through the sal
 	assert.throws(() => libsignalExtra().receive_auth_credential_without_pni(new Uint8Array(0), "1b9c2f0e-4d6a-4c3b-9e8f-0a1b2c3d4e5f", new Uint8Array(32), 0, new Uint8Array(4)));
 });
 
+// --- Our profile name (no network) ---
+
+test("profile names are padded to 53 or 257 bytes and encrypted as Desktop does", async () => {
+	const { encryptProfileName, decryptProfileName } = await import("../dist/index.js");
+	const key = new Uint8Array(32).fill(7);
+	const short = await encryptProfileName({ given: "MCP01" }, key);
+	assert.equal(short.length, 12 + 53 + 16, "81 bytes, as the server requires");
+	assert.deepEqual(await decryptProfileName(short, key), { given: "MCP01", family: undefined });
+	const both = await encryptProfileName({ given: "Signal", family: "Bot" }, key);
+	assert.deepEqual(await decryptProfileName(both, key), { given: "Signal", family: "Bot" });
+	assert.equal((await encryptProfileName({ given: "x".repeat(53) }, key)).length, 81);
+	assert.equal((await encryptProfileName({ given: "x".repeat(54) }, key)).length, 12 + 257 + 16, "285 bytes");
+	assert.equal((await encryptProfileName({ given: "Ærlig Øystein Åsheim" }, key)).length, 81, "UTF-8 bytes count, not characters");
+	await assert.rejects(decryptProfileName(both, new Uint8Array(32).fill(8)), "another key can't read it");
+});
+
+test("profile names are checked before anything is encrypted", async () => {
+	const { checkProfileName } = await import("../dist/index.js");
+	assert.deepEqual(checkProfileName({ given: "  Bot ", family: "  " }), { given: "Bot", family: undefined });
+	assert.throws(() => checkProfileName({ given: " " }), /given name/);
+	assert.throws(() => checkProfileName({ given: "a\0b" }), /NUL/);
+	assert.throws(() => checkProfileName({ given: "x".repeat(258) }), /at most 257/);
+});
+
+test("the profile request has the shape Signal-Server's CreateProfileRequest validates", async () => {
+	const { profileRequestBody, decryptProfileName, decryptProfileItem, fromBase64 } = await import("../dist/index.js");
+	const key = new Uint8Array(32).fill(9);
+	const aci = "1b9c2f0e-4d6a-4c3b-9e8f-0a1b2c3d4e5f";
+	const body = await profileRequestBody(key, aci, { given: "MCP01" });
+	assert.match(body.version, /^[0-9a-f]{64}$/, "@ValidHexString @ExactlySize(64)");
+	assert.equal((await profileRequestBody(key, aci, { given: "Other" })).version, body.version, "the version depends on key and ACI only");
+	assert.notEqual((await profileRequestBody(key, "2b9c2f0e-4d6a-4c3b-9e8f-0a1b2c3d4e5f", { given: "MCP01" })).version, body.version);
+	assert.equal(fromBase64(body.name).length, 81);
+	assert.deepEqual(await decryptProfileName(fromBase64(body.name), key), { given: "MCP01", family: undefined });
+	assert.equal(fromBase64(body.phoneNumberSharing).length, 29, "@ExactlySize({0, 29})");
+	assert.deepEqual([...(await decryptProfileItem(fromBase64(body.phoneNumberSharing), key))], [0]);
+	assert.ok(fromBase64(body.commitment).length > 0);
+	assert.deepEqual(
+		{ about: body.about, aboutEmoji: body.aboutEmoji, paymentAddress: body.paymentAddress, avatar: body.avatar, sameAvatar: body.sameAvatar, badgeIds: body.badgeIds },
+		{ about: null, aboutEmoji: null, paymentAddress: null, avatar: false, sameAvatar: false, badgeIds: [] },
+	);
+});
+
+test("setProfileName needs an account before any network call", async () => {
+	const client = new SignalClient({ db: memoryDb(), storageKey: TEST_STORAGE_KEY });
+	await assert.rejects(client.setProfileName("Bot"), /not linked/);
+	await assert.rejects(client.setProfileName(" "), /given name/);
+	assert.equal(client.status().state, "unlinked");
+});
+
 test("account entropy pool characters are uniform (no modulo bias)", async () => {
 	const { generateAccountEntropyPool } = await import("../dist/index.js");
 	const counts = new Map();

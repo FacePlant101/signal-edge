@@ -2,8 +2,9 @@
 
 signal-edge follows [semantic versioning](https://semver.org) for 0.x: a breaking change bumps the minor version.
 
-## 0.4.1
+## 0.5.0
 
+- **Profile name**: `setProfileName(given, family?)` sets the account's profile name as its primary device (`PUT /v1/profile`), as Signal-Desktop does: the name (`given\0family`, zero-padded to 53 or 257 bytes) encrypted with AES-256-GCM under the profile key, phone-number sharing off, no avatar, and the profile key's version and commitment for our ACI (new WASM exports `profile_key_version` and `profile_key_commitment`, from libsignal's zkgroup). People we message see the name once their app fetches the profile with the profile key our messages carry. `profileName()` returns the name this device last set. Linked devices refuse: their profile belongs to the phone. The encryption helpers are exported (`encryptProfileName`, `decryptProfileName`, `encryptProfileItem`, `decryptProfileItem`, `checkProfileName`, `profileRequestBody`, `setProfile`).
 - `parseAccountKey` (and so `loginWithAccountKey`) takes the Account Key as Signal's app shows it: Signal-Android writes the letter O as `#` and the digit 0 as `=` (`AccountEntropyPool.formatForDisplay`), which 0.4.0 refused ("the Account Key has 64 letters and digits"). Anything else that isn't a letter or digit is ignored, as in the app.
 
 ## 0.4.0

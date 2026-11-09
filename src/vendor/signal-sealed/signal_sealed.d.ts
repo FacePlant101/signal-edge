@@ -96,6 +96,18 @@ export function group_send_full_token(endorsements: Uint8Array | number[], count
 export function master_key_from_entropy_pool(pool: string): Uint8Array;
 
 /**
+ * Serialized ProfileKeyCommitment for `aci`: `commitment` (base64) in `PUT /v1/profile`.
+ * Desktop `deriveProfileKeyCommitment`.
+ */
+export function profile_key_commitment(profile_key: Uint8Array | number[], aci: string): Uint8Array;
+
+/**
+ * Our profile's version for `aci` (64 hex characters): `version` in `PUT /v1/profile` and the
+ * version others fetch (`GET /v1/profile/{aci}/{version}`). Desktop `deriveProfileKeyVersion`.
+ */
+export function profile_key_version(profile_key: Uint8Array | number[], aci: string): string;
+
+/**
  * One entry of `GET /v1/certificate/auth/group`: verifies the response for our ACI and PNI
  * and returns the serialized AuthCredentialWithPni for that redemption day.
  */
@@ -202,6 +214,8 @@ export interface InitOutput {
     readonly group_send_endorsements_expiration: (a: number, b: number) => [number, number, number];
     readonly group_send_full_token: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
     readonly master_key_from_entropy_pool: (a: number, b: number) => [number, number, number, number];
+    readonly profile_key_commitment: (a: number, b: number, c: number, d: number) => [number, number, number, number];
+    readonly profile_key_version: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly receive_auth_credential: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number, number, number];
     readonly receive_auth_credential_without_pni: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number, number, number];
     readonly receive_group_send_endorsements: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number, number, number];

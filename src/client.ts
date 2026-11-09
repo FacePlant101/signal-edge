@@ -17,6 +17,7 @@ import {
 } from "./protocol/groups.js";
 import { accessKey, CONTENT_HINT, libsignalExtra } from "./protocol/sealed.js";
 import { readStorage } from "./protocol/storage-service.js";
+import { checkProfileName, profileRequestBody, setProfile, type ProfileName } from "./protocol/profile.js";
 import type { WsRequest } from "./protocol/proto.js";
 import { receiveEnvelope, type Self } from "./protocol/receiver.js";
 import { contentWithData, contentWithSentTranscript, dataMessage, quoteMessage, reactionMessage, sendToServiceId, type SendContext } from "./protocol/sender.js";
@@ -116,6 +117,8 @@ type AccountSecrets = {
 	linkedAt: number;
 	/** The account's primary device (registered here with a phone number), not a linked one. */
 	primary?: boolean;
+	/** The profile name this device last set (setProfileName); the server only has it encrypted. */
+	profileName?: ProfileName;
 };
 type PreKeyRecord = { id: number; record: string };
 /** A registration in progress: the verification session for `number`, for the account generation it began in. */
@@ -589,6 +592,31 @@ export class SignalClient {
 			linkedAt: Date.now(),
 			primary: true,
 		};
+	}
+
+	// --- our profile ---
+
+	/**
+	 * Sets the account's profile name (PUT /v1/profile, encrypted with our profile key, no avatar),
+	 * as the primary device: what people we message see once their app fetches our profile with the
+	 * profile key our messages carry. A linked device's profile belongs to the phone, so set it there.
+	 */
+	async setProfileName(given: string, family?: string): Promise<ProfileName> {
+		const name = checkProfileName({ given, family });
+		const generation = this.#generation;
+		const a = await this.#loadSecrets();
+		if (!a.primary) throw new Error("this is a linked device: set the profile name on the phone");
+		const body = await profileRequestBody(fromBase64(a.profileKey), a.aci, name);
+		await setProfile(deviceAuth(a), body);
+		const sealed = await this.#sealSecrets({ ...a, profileName: name });
+		this.#stillCurrent(generation);
+		this.#put("account_secrets", sealed);
+		return name;
+	}
+
+	/** The profile name this device last set, if any. */
+	async profileName(): Promise<ProfileName | undefined> {
+		return (await this.#loadSecrets()).profileName;
 	}
 
 	// --- Signal Login: recover an account by its Account ID and Account Key ---

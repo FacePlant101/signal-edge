@@ -441,6 +441,71 @@ export function master_key_from_entropy_pool(pool) {
 }
 
 /**
+ * Serialized ProfileKeyCommitment for `aci`: `commitment` (base64) in `PUT /v1/profile`.
+ * Desktop `deriveProfileKeyCommitment`.
+ * @param {Uint8Array | number[]} profile_key
+ * @param {string} aci
+ * @returns {Uint8Array}
+ */
+export function profile_key_commitment(profile_key, aci) {
+    let ptr0, len0, ptr1, len1;
+    try {
+        ptr0 = passArray8ToWasm0(profile_key, wasm.__wbindgen_malloc);
+        len0 = WASM_VECTOR_LEN;
+        ptr1 = passStringToWasm0(aci, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        len1 = WASM_VECTOR_LEN;
+    } catch (e) {
+        if (ptr1) { wasm.__wbindgen_free(ptr1, len1 * 1, 1); }
+        if (ptr0) { wasm.__wbindgen_free(ptr0, len0 * 1, 1); }
+        throw e;
+    }
+    const ret = wasm.profile_key_commitment(ptr0, len0, ptr1, len1);
+    if (ret[3]) {
+        throw takeFromExternrefTable0(ret[2]);
+    }
+    var v3 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
+    wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
+    return v3;
+}
+
+/**
+ * Our profile's version for `aci` (64 hex characters): `version` in `PUT /v1/profile` and the
+ * version others fetch (`GET /v1/profile/{aci}/{version}`). Desktop `deriveProfileKeyVersion`.
+ * @param {Uint8Array | number[]} profile_key
+ * @param {string} aci
+ * @returns {string}
+ */
+export function profile_key_version(profile_key, aci) {
+    let deferred4_0;
+    let deferred4_1;
+    try {
+        let ptr0, len0, ptr1, len1;
+        try {
+            ptr0 = passArray8ToWasm0(profile_key, wasm.__wbindgen_malloc);
+            len0 = WASM_VECTOR_LEN;
+            ptr1 = passStringToWasm0(aci, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+            len1 = WASM_VECTOR_LEN;
+        } catch (e) {
+            if (ptr1) { wasm.__wbindgen_free(ptr1, len1 * 1, 1); }
+            if (ptr0) { wasm.__wbindgen_free(ptr0, len0 * 1, 1); }
+            throw e;
+        }
+        const ret = wasm.profile_key_version(ptr0, len0, ptr1, len1);
+        var ptr3 = ret[0];
+        var len3 = ret[1];
+        if (ret[3]) {
+            ptr3 = 0; len3 = 0;
+            throw takeFromExternrefTable0(ret[2]);
+        }
+        deferred4_0 = ptr3;
+        deferred4_1 = len3;
+        return getStringFromWasm0(ptr3, len3);
+    } finally {
+        wasm.__wbindgen_free(deferred4_0, deferred4_1, 1);
+    }
+}
+
+/**
  * One entry of `GET /v1/certificate/auth/group`: verifies the response for our ACI and PNI
  * and returns the serialized AuthCredentialWithPni for that redemption day.
  * @param {Uint8Array | number[]} server_public_params

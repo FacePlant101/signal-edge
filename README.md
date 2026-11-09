@@ -27,7 +27,7 @@ It has run a real account in production on Cloudflare Workers since 2026-11-09.
 | Counters and last errors that survive restarts | built |
 | Node.js (`signal-edge/node`) | unit-tested; CI reaches Signal's servers with it on every run (TLS, provisioning socket); not yet run against an account |
 
-Not there yet: phone-number lookup (CDSI needs SGX attestation, so recipients are ACIs), delivery/read receipts, stories, calls, a PIN and registration lock for standalone accounts (SVR2 needs SGX attestation, so such an account can only be registered again with a new code), profile names for standalone accounts.
+Not there yet: phone-number lookup (CDSI needs SGX attestation, so recipients are ACIs), delivery/read receipts, stories, calls, a PIN and registration lock for standalone accounts (SVR2 needs SGX attestation, so such an account can only be registered again with a new code), profile avatars and about text, usernames.
 
 ## How it works
 
@@ -145,6 +145,7 @@ The WASM files are `@getmaapp/signal-wasm/signal_wasm_bg.wasm`, `signal-edge/was
 | `startLink()` | opens the provisioning socket, returns the `sgnl://linkdevice` URL; linking finishes in the background (`waitUntil`) |
 | `startRegistration(number)`, `submitCaptcha(token)`, `requestCode("sms" \| "voice")`, `verifyCode(code)` | registers a number (E.164) as a new standalone account, this device as its primary: the server asks for a captcha first (solve one at `signalcaptchas.org/registration/generate.html`, pass the `signalcaptcha://…` token), then sends a code. Registering a number that is in use moves its account here and signs out the phone that had it |
 | `loginWithAccountKey(accountId, accountKey, { totp? })` | makes this device the primary of an existing account: Signal Login's Account ID (the ACI) and Account Key (the account entropy pool) prove it, as with an account registered without a phone number in Signal's app. The device that had the account is signed out; new identity keys (contacts see a new safety number), the profile key comes back from the storage service |
+| `setProfileName(given, family?)`, `profileName()` | the account's profile name, as its primary device (`PUT /v1/profile`, encrypted with the profile key); people we message see it once their app fetches the profile |
 | `maintain()` | watchdog: (re)connects the receive socket, prunes retry state, refreshes prekeys and contacts when due; returns when to run next |
 | `startReceiving()`, `stopReceiving()`, `receiveStatus()` | the receive socket and its counters |
 | `sendText(to, body, files?, extras?)` | `to` = `"self"`, `aci:<uuid>` or `group:<id>`; `files` = forwarded attachments (`{ref}`), text or base64; `extras` = `replyTo` / `reaction` by a stored message's sentAt; `@[aci:<uuid>]` in group text is a mention. Returns devices reached, sealed-sender and sender-key use, sync result, safety-number changes |

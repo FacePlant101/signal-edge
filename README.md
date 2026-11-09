@@ -12,6 +12,7 @@ It has run a real account in production on Cloudflare Workers since 2026-11-09.
 |---|---|
 | Linking (provisioning socket, QR code, `PUT /v1/devices/link`) | verified on a real account |
 | Standalone registration (verification session, captcha, SMS/voice code, `POST /v1/registration`; no PIN) | built; not yet run against Signal |
+| Signal Login: taking over an account by its Account ID and Account Key (recovery by ACI, `POST /v1/registration`), accounts without a phone number (no PNI, group credentials from the auth credential salt) | built; not yet run against Signal |
 | Receive loop (authenticated WebSocket, sealed sender, 1:1, groups via sender keys, sync transcripts, receipts, typing) | verified on a real account |
 | Prekeys (one-time, Kyber, signed, last resort; refill and rotation like Desktop) | verified on a real account |
 | 1:1 and group text sends, sync transcripts to your other devices | verified on a real account |
@@ -143,6 +144,7 @@ The WASM files are `@getmaapp/signal-wasm/signal_wasm_bg.wasm`, `signal-edge/was
 | `status()`, `self()` | link state; our ACI/PNI/device once linked |
 | `startLink()` | opens the provisioning socket, returns the `sgnl://linkdevice` URL; linking finishes in the background (`waitUntil`) |
 | `startRegistration(number)`, `submitCaptcha(token)`, `requestCode("sms" \| "voice")`, `verifyCode(code)` | registers a number (E.164) as a new standalone account, this device as its primary: the server asks for a captcha first (solve one at `signalcaptchas.org/registration/generate.html`, pass the `signalcaptcha://…` token), then sends a code. Registering a number that is in use moves its account here and signs out the phone that had it |
+| `loginWithAccountKey(accountId, accountKey, { totp? })` | makes this device the primary of an existing account: Signal Login's Account ID (the ACI) and Account Key (the account entropy pool) prove it, as with an account registered without a phone number in Signal's app. The device that had the account is signed out; new identity keys (contacts see a new safety number), the profile key comes back from the storage service |
 | `maintain()` | watchdog: (re)connects the receive socket, prunes retry state, refreshes prekeys and contacts when due; returns when to run next |
 | `startReceiving()`, `stopReceiving()`, `receiveStatus()` | the receive socket and its counters |
 | `sendText(to, body, files?, extras?)` | `to` = `"self"`, `aci:<uuid>` or `group:<id>`; `files` = forwarded attachments (`{ref}`), text or base64; `extras` = `replyTo` / `reaction` by a stored message's sentAt; `@[aci:<uuid>]` in group text is a mention. Returns devices reached, sealed-sender and sender-key use, sync result, safety-number changes |

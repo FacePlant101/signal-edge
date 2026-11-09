@@ -64,7 +64,11 @@ export function groupIdFromMasterKey(masterKey: Uint8Array): string {
  * GET /v1/certificate/auth/group for today plus six days, verified for our ACI and PNI
  * (Desktop maybeFetchNewCredentials). Returns the received AuthCredentialWithPni per day.
  */
-export async function fetchCredentials(chatAuth: string, aci: string, pni: string | undefined): Promise<Credential[]> {
+/**
+ * Group auth credentials for the coming days. `authCredentialSalt`: accounts without a phone number
+ * (no PNI) get credentials bound to it instead (Signal-Server issueAuthCredentialZkcWithoutPni).
+ */
+export async function fetchCredentials(chatAuth: string, aci: string, pni: string | undefined, authCredentialSalt?: Uint8Array): Promise<Credential[]> {
 	const today = Math.floor(Date.now() / 1000 / DAY_S) * DAY_S;
 	const end = today + (CREDENTIAL_DAYS - 1) * DAY_S;
 	const res = await signalFetch(
@@ -76,8 +80,14 @@ export async function fetchCredentials(chatAuth: string, aci: string, pni: strin
 	if (res.status !== 200) throw new Error(`GET /v1/certificate/auth/group failed: HTTP ${res.status} ${dec.decode(res.body).slice(0, 200)}`);
 	const body = JSON.parse(dec.decode(res.body)) as { pni?: string; credentials: Credential[] };
 	const ourPni = body.pni ?? pni;
-	if (!ourPni) throw new Error("group credentials need our PNI");
 	const x = libsignalExtra();
+	if (!ourPni) {
+		if (!authCredentialSalt?.length) throw new Error("group credentials need our PNI, or the auth credential salt of an account without a phone number");
+		return body.credentials.map((c) => ({
+			redemptionTime: c.redemptionTime,
+			credential: toBase64(x.receive_auth_credential_without_pni(SERVER_PUBLIC_PARAMS, aci, authCredentialSalt, c.redemptionTime, fromBase64(c.credential))),
+		}));
+	}
 	return body.credentials.map((c) => ({
 		redemptionTime: c.redemptionTime,
 		credential: toBase64(x.receive_auth_credential(SERVER_PUBLIC_PARAMS, aci, ourPni.replace(/^PNI:/, ""), c.redemptionTime, fromBase64(c.credential))),

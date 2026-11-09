@@ -1,5 +1,6 @@
 // Read-only storage-service client: the account's group list (master keys) and contact names,
-// which a linked device otherwise only learns from traffic. Ported from Signal-Desktop
+// which a linked device otherwise only learns from traffic, and the account record (its profile key,
+// which a recovered primary device takes back). Ported from Signal-Desktop
 // ts/services/storage.preload.ts, ts/Crypto.node.ts (key derivation) and protos/SignalStorage.proto.
 
 import { signalFetch } from "../net/http.js";
@@ -10,7 +11,7 @@ import { CHAT_HOST } from "./socket.js";
 
 export const STORAGE_HOST = "storage.signal.org";
 
-const RECORD = { CONTACT: 1, GROUPV2: 3 } as const;
+const RECORD = { CONTACT: 1, GROUPV2: 3, ACCOUNT: 4 } as const;
 /** Desktop MAX_READ_KEYS. */
 const READ_BATCH = 2500;
 
@@ -27,7 +28,9 @@ export type StorageContact = {
 	hidden: boolean;
 	profileKey?: Uint8Array;
 };
-export type StorageSnapshot = { version: number; groups: StorageGroup[]; contacts: StorageContact[] };
+/** Our own account's record (SignalStorage.proto AccountRecord): what this module reads of it. */
+export type StorageAccount = { profileKey?: Uint8Array; givenName?: string; familyName?: string };
+export type StorageSnapshot = { version: number; groups: StorageGroup[]; contacts: StorageContact[]; account?: StorageAccount };
 
 /** Reads the whole storage manifest and the group and contact records it lists. */
 export async function readStorage(chatAuth: string, masterKey: Uint8Array): Promise<StorageSnapshot> {
@@ -49,7 +52,7 @@ export async function readStorage(chatAuth: string, masterKey: Uint8Array): Prom
 	const wanted = (record.fields.get(2) ?? [])
 		.filter((v): v is Uint8Array => v instanceof Uint8Array)
 		.map((id) => new Decoded(id))
-		.filter((id) => id.uint(2) === RECORD.CONTACT || id.uint(2) === RECORD.GROUPV2)
+		.filter((id) => id.uint(2) === RECORD.CONTACT || id.uint(2) === RECORD.GROUPV2 || id.uint(2) === RECORD.ACCOUNT)
 		.map((id) => id.bytes(1)!)
 		.filter(Boolean);
 
@@ -73,7 +76,12 @@ export async function readStorage(chatAuth: string, masterKey: Uint8Array): Prom
 			const rec = new Decoded(await aesGcmOpen(itemKey, value));
 			const group = rec.bytes(RECORD.GROUPV2);
 			const contact = rec.bytes(RECORD.CONTACT);
-			if (group) {
+			const account = rec.bytes(RECORD.ACCOUNT);
+			if (account) {
+				const ac = new Decoded(account);
+				const profileKey = ac.bytes(1);
+				snapshot.account = { profileKey: profileKey?.length === 32 ? profileKey : undefined, givenName: ac.string(2) || undefined, familyName: ac.string(3) || undefined };
+			} else if (group) {
 				const g = new Decoded(group);
 				const masterKey = g.bytes(1);
 				if (masterKey?.length === 32) snapshot.groups.push({ masterKey, blocked: g.bool(2) ?? false, archived: g.bool(4) ?? false });

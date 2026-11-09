@@ -2,10 +2,11 @@
 
 signal-edge follows [semantic versioning](https://semver.org) for 0.x: a breaking change bumps the minor version.
 
-## Unreleased
+## 0.3.0
 
 - **Standalone registration**: a phone number can be registered as a new account with this device as its primary, no phone app needed, following Signal-Desktop's standalone registration (nightly builds): `startRegistration(number)` → `submitCaptcha(token)` → `requestCode("sms" | "voice")` → `verifyCode(code)`. The account gets new identity keys, registration ids, profile key and account entropy pool (with its registration recovery password). `status()` reports `{ state: "registering", step }` meanwhile and `primary: true` once registered. No PIN or registration lock yet (SVR2 needs SGX attestation). The REST calls are exported too (`createVerificationSession`, `submitCaptcha`, `requestVerificationCode`, `submitVerificationCode`, `registerAccount`, `registrationBody`); a second `verifyCode()` while one runs shares it, and one after a failed account creation goes straight to creating the account.
 - Sends to our own account (sync transcripts, Note to Self) reach nobody on a primary account without linked devices: `sendToServiceId` returns `[]` without sending, and `notifySelf()` refuses, since no other device would show it. `notifyContact(aci, body)` sends such one-time messages to a contact instead (not stored, logged or synced).
+- Releases are staged on npm (`npm stage publish`, with provenance) and go public once a maintainer approves them with 2FA; built with TypeScript 7. Added SECURITY.md and Dependabot.
 
 ## 0.2.0
 

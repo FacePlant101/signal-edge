@@ -227,8 +227,9 @@ export function generateAccountEntropyPool(): string {
 	let out = "";
 	while (out.length < AEP_LENGTH) {
 		for (const b of randomBytes(AEP_LENGTH)) {
-			// 252 = 7 × 36: dropping bytes above it keeps every character equally likely.
-			if (b < 252 && out.length < AEP_LENGTH) out += AEP_ALPHABET[b % 36];
+			// Rejection sampling: bytes 252..255 are dropped, and each of the 36 characters gets exactly
+			// 7 of the remaining 252 values (b / 7), so every character is equally likely.
+			if (b < 252 && out.length < AEP_LENGTH) out += AEP_ALPHABET[Math.floor(b / 7)];
 		}
 	}
 	return out;

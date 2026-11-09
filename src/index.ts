@@ -6,6 +6,7 @@
 // The client
 export {
 	SignalClient,
+	AccountForgotten,
 	SIGNAL_TABLES,
 	type SignalClientOptions,
 	type LinkState,

@@ -34,12 +34,16 @@ export function cdnIdFromFixed64(b: Uint8Array | undefined): string | undefined 
 export const DEFAULT_MAX_ATTACHMENT_BYTES = 25_000_000;
 /** Uploads can be large and slow: their requests get this long. */
 const UPLOAD_TIMEOUT_MS = 10 * 60_000;
+/** Deadline for a whole download, redirects included (large files on slow links take minutes). */
+const DOWNLOAD_TIMEOUT_MS = 10 * 60_000;
 
 export type DownloadOptions = {
 	/** Largest plaintext accepted (default 25 MB). The download stops as soon as more than its encrypted size arrives. */
 	maxBytes?: number;
 	/** Cancels the download and closes its connection. */
 	signal?: AbortSignal;
+	/** Deadline for the whole download, redirects included (default 10 minutes). */
+	timeoutMs?: number;
 };
 
 /**
@@ -64,8 +68,10 @@ export async function downloadAttachment(p: AttachmentPointer, size: number | un
 	const name = p.cdnNumber === 0 ? p.cdnId : p.cdnKey;
 	if (!host || !name) throw new Error(`attachment has no download location (cdn ${p.cdnNumber})`);
 	let url = new URL(`https://${host}/attachments/${encodeURIComponent(name)}`);
+	const timeoutMs = opts.timeoutMs ?? DOWNLOAD_TIMEOUT_MS;
+	const signal = withTimeout(opts.signal, timeoutMs);
 	for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
-		const res = url.hostname.endsWith(".signal.org") && !fetchOnlyHosts.has(url.hostname) ? await signalGetOrFetch(url, limit, opts.signal) : await publicGet(url, limit, opts.signal);
+		const res = url.hostname.endsWith(".signal.org") && !fetchOnlyHosts.has(url.hostname) ? await signalGetOrFetch(url, limit, signal, timeoutMs) : await publicGet(url, limit, signal);
 		if (res.status >= 300 && res.status < 400 && res.location) {
 			url = redirectTarget(url, res.location);
 			continue;
@@ -105,9 +111,9 @@ function refusesSockets(e: unknown): boolean {
 type Got = { status: number; location?: string; body: Uint8Array };
 
 /** signalGet, falling back to fetch() when the socket can't reach the host because Cloudflare fronts it. */
-async function signalGetOrFetch(url: URL, limit: number, signal?: AbortSignal): Promise<Got> {
+async function signalGetOrFetch(url: URL, limit: number, signal: AbortSignal, timeoutMs: number): Promise<Got> {
 	try {
-		return await signalGet(url, limit, signal);
+		return await signalGet(url, limit, signal, timeoutMs);
 	} catch (e) {
 		if (!refusesSockets(e)) throw e;
 		console.warn(`attachment download: ${url.hostname} refuses raw sockets (behind Cloudflare); using fetch()`);
@@ -116,13 +122,13 @@ async function signalGetOrFetch(url: URL, limit: number, signal?: AbortSignal): 
 	}
 }
 
-async function signalGet(url: URL, limit: number, signal?: AbortSignal): Promise<Got> {
-	const res = await signalFetch(url.hostname, "GET", url.pathname + url.search, { maxBytes: limit, signal });
+async function signalGet(url: URL, limit: number, signal: AbortSignal, timeoutMs: number): Promise<Got> {
+	const res = await signalFetch(url.hostname, "GET", url.pathname + url.search, { maxBytes: limit, signal, timeoutMs });
 	return { status: res.status, location: res.headers.get("location") ?? undefined, body: res.body };
 }
 
-/** fetch(), reading at most `limit` bytes of the body. */
-async function publicGet(url: URL, limit: number, signal?: AbortSignal): Promise<Got> {
+/** fetch(), reading at most `limit` bytes of the body; `signal` carries the deadline. */
+async function publicGet(url: URL, limit: number, signal: AbortSignal): Promise<Got> {
 	const res = await fetch(url, { redirect: "manual", signal });
 	const location = res.headers.get("location") ?? undefined;
 	const tooLarge = () => new Error(`attachment download: response larger than ${limit} bytes`);
@@ -228,8 +234,9 @@ async function uploadRequest(url: URL, method: string, headers: Record<string, s
 			fetchOnlyHosts.add(url.hostname);
 		}
 	}
-	const res = await fetch(url, { method, headers, body, redirect: "manual" });
-	await res.arrayBuffer();
+	// fetch() has no deadline of its own; the response body isn't needed.
+	const res = await fetch(url, { method, headers, body, redirect: "manual", signal: AbortSignal.timeout(UPLOAD_TIMEOUT_MS) });
+	await res.body?.cancel().catch(() => {});
 	return { status: res.status, header: (n) => res.headers.get(n) ?? undefined };
 }
 
@@ -322,4 +329,10 @@ export async function expandLongText(
 		}
 	}
 	return { expanded, failed };
+}
+
+/** `signal` (if any) combined with a deadline `ms` from now. */
+function withTimeout(signal: AbortSignal | undefined, ms: number): AbortSignal {
+	const deadline = AbortSignal.timeout(ms);
+	return signal ? AbortSignal.any([signal, deadline]) : deadline;
 }

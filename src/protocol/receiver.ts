@@ -7,6 +7,7 @@ import { DecryptFailure } from "./retry.js";
 import { unseal } from "./sealed.js";
 import type { OurIdentity, ProtocolStore } from "./store.js";
 import { signal } from "./wasm.js";
+import { timingSafeEqual } from "../util/bytes.js";
 
 export type Self = { aci: string; pni?: string; deviceId: number };
 
@@ -73,7 +74,7 @@ export async function receiveEnvelope(
 		const identityKey = type === CIPHERTEXT.PREKEY ? preKeyMessageIdentity(ciphertext) : undefined;
 		// Our own other devices share our ACI identity key; anything else claiming to be us (only the
 		// server could send it) is refused, since our own account's messages may carry sync transcripts.
-		if (identityKey && sender === self.aci && !sameBytes(identityKey, ourIdentityKey(identityPairs.aci))) {
+		if (identityKey && sender === self.aci && !timingSafeEqual(identityKey, ourIdentityKey(identityPairs.aci))) {
 			throw new Error("a PreKey message from our own account carries a different identity key");
 		}
 		const check = identityKey && (await identities.check(sender, identityKey));
@@ -114,8 +115,4 @@ export async function receiveEnvelope(
 function ourIdentityKey(pair: Uint8Array | undefined): Uint8Array {
 	if (!pair) return new Uint8Array(0);
 	return signal().WasmIdentityKeyPair.deserialize(pair).public_key.serialize();
-}
-
-function sameBytes(a: Uint8Array, b: Uint8Array): boolean {
-	return a.length === b.length && a.every((x, i) => x === b[i]);
 }

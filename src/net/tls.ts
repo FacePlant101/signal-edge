@@ -39,8 +39,9 @@ export class TlsSocket {
 				}
 				for (;;) {
 					// After the peer's close_notify rustls takes no more input (feeding it more would spin):
-					// the stream ends here, whatever else arrives.
-					if (this.#tls.peer_closed) {
+					// the stream ends here, whatever else arrives. After close() the TLS state is freed:
+					// #closed is checked before every use of it that follows an await.
+					if (this.#closed || this.#tls.peer_closed) {
 						controller.close();
 						return;
 					}
@@ -55,7 +56,7 @@ export class TlsSocket {
 						controller.enqueue(plaintext);
 						return;
 					}
-					if (this.#tls.peer_closed) {
+					if (this.#closed || this.#tls.peer_closed) {
 						controller.close();
 						return;
 					}

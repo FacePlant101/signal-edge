@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { memoryDb, TEST_STORAGE_KEY } from "./node-host.mjs";
-import { encodeProto, keepGroups, parseContent, Sealer, SignalClient } from "../dist/index.js";
+import { AccountForgotten, encodeProto, keepGroups, parseContent, Sealer, SignalClient } from "../dist/index.js";
 import { readBody } from "../dist/net/http.js";
 import { withDeadline } from "../dist/util/deadline.js";
 import { ByteQueue } from "../dist/util/bytes.js";
@@ -130,6 +130,32 @@ test("the link record kept outside the sealed secrets holds no phone number", ()
 	const stored = new TextDecoder().decode(db.exec("SELECT value FROM kv WHERE key = 'account_meta'")[0].value);
 	assert.ok(!stored.includes("+15550100"), stored);
 	assert.equal(JSON.parse(stored).aci, link.aci);
+});
+
+test("after a restart the phone number comes back from the sealed secrets", async () => {
+	const db = memoryDb();
+	db.exec("CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value BLOB NOT NULL)");
+	const aci = "11111111-1111-4111-8111-111111111111";
+	const link = { state: "linked", aci, deviceId: 3, linkedAt: 1 };
+	db.exec("INSERT INTO kv (key, value) VALUES ('account_meta', ?)", new TextEncoder().encode(JSON.stringify(link)));
+	const sealer = await Sealer.fromBase64(TEST_STORAGE_KEY);
+	const secrets = await sealer.seal("account_secrets", new TextEncoder().encode(JSON.stringify({ aci, number: "+15550100", deviceId: 3 })));
+	db.exec("INSERT INTO kv (key, value) VALUES ('account_secrets', ?)", secrets);
+	const client = new SignalClient({ db, storageKey: TEST_STORAGE_KEY });
+	for (let i = 0; i < 100 && client.status().number === undefined; i++) await new Promise((r) => setTimeout(r, 5));
+	assert.equal(client.status().number, "+15550100");
+});
+
+test("work holding the database from before a reset can't touch the next account's data", async () => {
+	const db = memoryDb();
+	const client = new SignalClient({ db, storageKey: TEST_STORAGE_KEY });
+	const before = await client.messageStore();
+	const dirBefore = await client.directory();
+	await client.reset();
+	await assert.rejects(async () => before.conversations(), AccountForgotten);
+	await assert.rejects(async () => dirBefore.putGroup({ id: "g", masterKey: "AAAA", source: "message" }), AccountForgotten);
+	// What is taken after the reset works.
+	assert.deepEqual(await (await client.messageStore()).conversations(), []);
 });
 
 test("nodeSqlite creates its database file readable by the owner only", () => {

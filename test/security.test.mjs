@@ -324,3 +324,15 @@ test("registration calls reject (not throw) on bad input", async () => {
 		await assert.rejects(p);
 	}
 });
+
+test("account entropy pool characters are uniform (no modulo bias)", async () => {
+	const { generateAccountEntropyPool } = await import("../dist/index.js");
+	const counts = new Map();
+	const n = 2000;
+	for (let i = 0; i < n; i++) for (const c of generateAccountEntropyPool()) counts.set(c, (counts.get(c) ?? 0) + 1);
+	const expected = (n * 64) / 36;
+	// Chi-squared over 36 characters (35 degrees of freedom): above 70 has p < 0.0005 for a uniform source.
+	let chi = 0;
+	for (const c of "0123456789abcdefghijklmnopqrstuvwxyz") chi += ((counts.get(c) ?? 0) - expected) ** 2 / expected;
+	assert.ok(chi < 70, `chi-squared ${chi.toFixed(1)}`);
+});

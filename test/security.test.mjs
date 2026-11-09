@@ -227,3 +227,18 @@ test("a quoted message is looked up by its author too, not just its timestamp", 
 	assert.equal((await messages.findSent(conversation, 1_700_000_000_000, "cccccccc-cccc-4ccc-8ccc-cccccccccccc"))?.body, "real");
 	assert.equal(await messages.findSent(conversation, 1_700_000_000_000, "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee"), undefined);
 });
+
+test("a refused rate limit names the limit that refused and uses up none of them", async () => {
+	const { Limiter } = await import("../dist/protocol/retry.js");
+	const l = new Limiter();
+	const limits = [
+		{ key: "own", max: 2, windowMs: 60_000 },
+		{ key: "all", max: 3, windowMs: 60_000 },
+	];
+	assert.equal(l.refusal(limits, 0), undefined);
+	assert.equal(l.refusal(limits, 1), undefined);
+	assert.equal(l.refusal(limits, 2), "own");
+	assert.equal(l.refusal([{ key: "other", max: 2, windowMs: 60_000 }, limits[1]], 3), undefined); // "all" had room: 2 used
+	assert.equal(l.refusal([{ key: "other", max: 2, windowMs: 60_000 }, limits[1]], 4), "all");
+	assert.equal(l.allow(limits, 60_001), true); // the window moved on
+});

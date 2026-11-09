@@ -132,7 +132,7 @@ const GROUP_REVISION_REFETCH_MS = 10_000;
 const NOT_OUR_GROUP_MS = 3600 * 1000;
 /** Fetches of groups we don't know yet, per sender and in total (made-up master keys each cost one). */
 const NEW_GROUP_FETCHES_PER_SENDER_HOUR = 10;
-const NEW_GROUP_FETCHES_PER_HOUR = 60;
+const NEW_GROUP_FETCHES_PER_HOUR = 300;
 /** Entries kept in each of the in-memory group maps above (the oldest go first). */
 const MAX_TRACKED_GROUPS = 1000;
 // Retry requests (src/signal/retry.ts). Desktop's RETRY_LIMIT is 5 per message; the hourly caps are ours.
@@ -290,8 +290,10 @@ export class SignalClient {
 	#protocol: Promise<unknown> = Promise.resolve();
 	#receive: ReceiveState = { connected: false, envelopes: 0, stored: 0, ignored: 0, failed: 0, kinds: {} };
 	#syncing?: Promise<DirectorySync>;
-	/** Group fetches in flight, per group id, with when each started. */
-	#groupRefreshes = new Map<string, { startedAt: number; promise: Promise<GroupRecord> }>();
+	/** Group fetches in flight, per group id, with the account generation and when each started. */
+	#groupRefreshes = new Map<string, { generation: number; startedAt: number; promise: Promise<GroupRecord> }>();
+	/** Fetches of groups we don't know yet, in flight, per group id. */
+	#newGroupFetches = new Map<string, { generation: number; promise: Promise<GroupRecord | "not a member"> }>();
 	/** When a sender's message last made us ask the server about a group, per "groupId sender". */
 	#memberChecks = new Map<string, number>();
 	/** When a message at a newer revision last made us refetch a group, per group id. */
@@ -412,6 +414,9 @@ export class SignalClient {
 		// stop: nothing started for it can write anything back, however long it still runs.
 		this.#generation++;
 		this.#aborter.abort(new AccountForgotten());
+		// Unlinked from the start: maintain() and the like stop at once. Until reset() returns, other
+		// calls that read the account fail with AccountForgotten.
+		this.#link = { state: "unlinked" };
 		await this.#socket?.close().catch(() => {});
 		const chat = this.#chat;
 		this.#chat = undefined;
@@ -432,6 +437,8 @@ export class SignalClient {
 		this.#stores = undefined;
 		this.#refusedAccessKeys.clear();
 		this.#memberChecks.clear();
+		this.#groupRefreshes.clear();
+		this.#newGroupFetches.clear();
 		this.#groupNotedAt.clear();
 		this.#notOurGroups.clear();
 		this.#groupLimits = new Limiter();
@@ -615,7 +622,7 @@ export class SignalClient {
 				for (const k of r.parsed.kinds) this.#count(k);
 				// Outside the protocol lock (may fetch group state): Signal's apps drop group messages from
 				// non-members, and so do we, before anything is stored or reported.
-				await this.#dropNonMembers(r.parsed, r.sender, self);
+				await this.#dropNonMembers(generation, r.parsed, r.sender, self);
 				this.#stillCurrent(generation);
 				await this.#checkQuotes(r.parsed.records, messages);
 				if (r.identityChanged) {
@@ -638,7 +645,7 @@ export class SignalClient {
 				// A copy we already had (e.g. resent after a retry request) mustn't start another reply run.
 				if (added) this.#notifyMessages(r.parsed.records, self);
 				// Outside the protocol lock: fetching group state is network-only.
-				for (const g of r.parsed.groups) void this.#noteGroup(g.masterKey, g.revision).catch((e) => console.error("group refresh failed", e));
+				for (const g of r.parsed.groups) void this.#noteGroup(generation, g.masterKey, g.revision, r.sender === self.aci).catch((e) => console.error("group refresh failed", e));
 				for (const t of r.parsed.timers) if (this.#chatTimers().apply(t)) this.#count("timer:updated");
 			}
 		} catch (e) {
@@ -755,6 +762,7 @@ export class SignalClient {
 	}
 
 	#retryError(what: string, e: unknown): void {
+		if (e instanceof AccountForgotten) return; // the account it was for is gone: nothing to record
 		this.#count("retry-request:failed");
 		this.#receive.lastRetryError = `${new Date().toISOString()} ${what}: ${e}`;
 		this.#lasting((c) => c.error("retry request", `${what}: ${e}`));
@@ -953,14 +961,14 @@ export class SignalClient {
 	 */
 	async #sendGroupText(generation: number, groupId: string, prepare: (conversation: string, members: string[]) => Promise<Outgoing>, mentioned: string[] = []): Promise<GroupSendResult> {
 		const a = await this.#loadSecrets();
-		const dir = await this.directory();
+		const dir = await this.#directoryFor(generation);
 		let g = await dir.group(groupId);
 		if (!g) throw new Error(`unknown group ${groupId}; run a directory sync or wait for a message from it`);
 		// Refetch when stale, or when a mention names someone the cached list lacks (they may have just
 		// joined); a minute's grace keeps a mistyped mention from refetching on every try.
 		const lacksMentioned = (r: NonNullable<typeof g>) => mentioned.some((aci) => !r.members?.some((m) => m.aci === aci));
 		if (!g.fetchedAt || !g.members || Date.now() - g.fetchedAt > GROUP_STALE_MS || (lacksMentioned(g) && Date.now() - g.fetchedAt > 60_000)) {
-			g = await this.#refreshGroup(g);
+			g = await this.#refreshGroup(g, 0, generation);
 		}
 		if (g.fetchError) throw new Error(`can't send to this group: ${g.fetchError}`);
 		if (g.terminated) throw new Error("this group has been ended");
@@ -1206,7 +1214,7 @@ export class SignalClient {
 	async #syncDirectory(): Promise<DirectorySync> {
 		const generation = this.#generation;
 		const a = await this.#loadSecrets();
-		const dir = await this.directory();
+		const dir = await this.#directoryFor(generation);
 		const snapshot = await readStorage(deviceAuth(a), this.#accountMasterKey(a));
 		this.#stillCurrent(generation);
 		await dir.replaceContacts(snapshot.contacts);
@@ -1222,7 +1230,7 @@ export class SignalClient {
 		let fetched = 0;
 		for (const g of known.values()) {
 			try {
-				const next = await this.#refreshGroup(g);
+				const next = await this.#refreshGroup(g, 0, generation);
 				if (next.fetchError) errors.push(`${g.id.slice(0, 8)}…: ${next.fetchError}`);
 				else fetched++;
 			} catch (e) {
@@ -1360,44 +1368,44 @@ export class SignalClient {
 	}
 
 	/**
-	 * Keeps a group named in a stored message current: fetches its state when it is new (budgeted) or at
-	 * a newer revision than stored, at most once per GROUP_REVISION_REFETCH_MS per group.
+	 * Keeps a group named in a stored message current: fetches its state at a newer revision than stored,
+	 * at most once per GROUP_REVISION_REFETCH_MS per group. Groups we don't know yet are fetched here only
+	 * when our own devices named them (a group the owner just made or joined); others' messages had theirs
+	 * fetched by the membership check.
 	 */
-	async #noteGroup(masterKey: Uint8Array, revision: number): Promise<void> {
+	async #noteGroup(generation: number, masterKey: Uint8Array, revision: number, fromOurDevices: boolean): Promise<void> {
 		const id = groupIdFromMasterKey(masterKey);
 		const now = Date.now();
 		if (now - (this.#groupNotedAt.get(id) ?? 0) < GROUP_REVISION_REFETCH_MS) return;
-		const known = await (await this.directory()).group(id);
+		const known = await (await this.#directoryFor(generation)).group(id);
 		if (known?.revision !== undefined && known.revision >= revision) return;
-		if (!known && ((this.#notOurGroups.get(id) ?? 0) > now || this.#newGroupBudget() !== true)) return;
+		if (!known && (!fromOurDevices || (this.#notOurGroups.get(id) ?? 0) > now)) return;
 		remember(this.#groupNotedAt, id, now);
-		if (known) await this.#refreshGroup(known);
-		else await this.#fetchNewGroup(id, masterKey);
+		if (known) await this.#refreshGroup(known, 0, generation);
+		else await this.#fetchNewGroup(generation, id, masterKey);
 	}
 
 	/**
 	 * Whether `sender` is a member of a group their message names. The stored member list answers when it
 	 * lists them at the message's revision; otherwise the groups server is asked (someone just added is
 	 * then found), at most once per GROUP_MEMBER_CHECK_MS per group and sender, so a non-member's
-	 * messages can't make us fetch more often than that. Groups we don't know yet are fetched within a
-	 * budget and stored only once the server hands us their state as a member.
+	 * messages can't make us fetch more often than that. Groups we don't know yet are fetched within
+	 * budgets and stored only once the server hands us their state as a member.
 	 * "unknown": can't tell right now (network trouble, or no member list yet); the message is kept.
 	 */
-	async #senderInGroup(id: string, masterKey: Uint8Array | undefined, revision: number | undefined, sender: string): Promise<"member" | "not a member" | "unknown"> {
+	async #senderInGroup(generation: number, id: string, masterKey: Uint8Array | undefined, revision: number | undefined, sender: string): Promise<"member" | "not a member" | "unknown"> {
 		const askedAt = Date.now();
-		const known = await (await this.directory()).group(id);
+		const known = await (await this.#directoryFor(generation)).group(id);
 		// A group the server lately said we aren't in, unless it has been stored since (we joined).
 		if (!known && (this.#notOurGroups.get(id) ?? 0) > askedAt) return "not a member";
-		const verdict = (g: GroupRecord | undefined) => {
-			if (g?.fetchError) return "not a member"; // the server says we're out of it: nothing from it counts
-			if (!g?.members) return "unknown";
-			return g.members.some((m) => m.aci === sender) ? "member" : "not a member";
-		};
+		const listed = (g: GroupRecord | undefined) => (!g?.members ? "unknown" : g.members.some((m) => m.aci === sender) ? "member" : "not a member");
 		const newer = revision !== undefined && (known?.revision === undefined || known.revision < revision);
-		if (verdict(known) === "member" && !newer) return "member";
+		// A stored fetchError (we were out of the group then, or, from earlier versions, a failed fetch)
+		// means the server is asked again.
+		if (!known?.fetchError && listed(known) === "member" && !newer) return "member";
 		const key = `${id} ${sender}`;
-		// Asked lately: the answer then (a group we aren't in is in #notOurGroups) or what is stored.
-		if (askedAt - (this.#memberChecks.get(key) ?? 0) < GROUP_MEMBER_CHECK_MS) return verdict(known);
+		// Without a fresh answer from the server, the stored member list decides.
+		if (askedAt - (this.#memberChecks.get(key) ?? 0) < GROUP_MEMBER_CHECK_MS) return listed(known);
 		if (!known) {
 			if (!masterKey) return "not a member";
 			const budget = this.#newGroupBudget(sender);
@@ -1415,12 +1423,13 @@ export class SignalClient {
 		remember(this.#memberChecks, key, askedAt);
 		try {
 			// A fetch that started before we asked may predate the sender joining: wait for a newer one.
-			const g = known ? await this.#refreshGroup(known, askedAt) : await this.#fetchNewGroup(id, masterKey!);
-			return g === "not a member" ? g : verdict(g);
+			const g = known ? await this.#refreshGroup(known, askedAt, generation) : await this.#fetchNewGroup(generation, id, masterKey!);
+			if (g === "not a member" || g.fetchError) return "not a member"; // the server says we aren't in it
+			return listed(g);
 		} catch (e) {
 			if (e instanceof AccountForgotten) throw e;
 			console.error("group fetch failed", e);
-			return verdict(known);
+			return listed(known);
 		}
 	}
 
@@ -1428,39 +1437,45 @@ export class SignalClient {
 	 * One more fetch of a group we don't know yet, within the hourly budgets: true, or which budget is
 	 * used up ("sender": this sender's; "overall").
 	 */
-	#newGroupBudget(sender?: string): true | "sender" | "overall" {
-		const overall = { key: "new", max: NEW_GROUP_FETCHES_PER_HOUR, windowMs: HOUR_MS };
-		if (sender) {
-			const own = { key: `new:${sender}`, max: NEW_GROUP_FETCHES_PER_SENDER_HOUR, windowMs: HOUR_MS };
-			if (this.#groupLimits.allow([own, overall])) return true;
-			// Refused: say which budget did it.
-			return this.#groupLimits.wouldAllow([own]) ? "overall" : "sender";
-		}
-		return this.#groupLimits.allow([overall]) ? true : "overall";
+	#newGroupBudget(sender: string): true | "sender" | "overall" {
+		const own = `new:${sender}`;
+		const refused = this.#groupLimits.refusal([
+			{ key: own, max: NEW_GROUP_FETCHES_PER_SENDER_HOUR, windowMs: HOUR_MS },
+			{ key: "new", max: NEW_GROUP_FETCHES_PER_HOUR, windowMs: HOUR_MS },
+		]);
+		return refused === undefined ? true : refused === own ? "sender" : "overall";
 	}
 
 	/**
-	 * Fetches a group we don't know yet and stores it if the server hands us its state. "not a member":
-	 * the server says we aren't in it (403/404); then it is ignored for NOT_OUR_GROUP_MS. Other
-	 * failures (network, 429, 5xx) throw and leave nothing behind.
+	 * Fetches a group we don't know yet (one fetch per group at a time) and stores it if the server hands
+	 * us its state. "not a member": the server says we aren't in it (403/404); then it is ignored for
+	 * NOT_OUR_GROUP_MS. Other failures (network, 429, 5xx) throw and leave nothing behind.
 	 */
-	async #fetchNewGroup(id: string, masterKey: Uint8Array): Promise<GroupRecord | "not a member"> {
-		const generation = this.#generation;
-		const dir = await this.directory();
-		try {
-			const state = await fetchGroupState(masterKey, await this.#groupCredential());
+	#fetchNewGroup(generation: number, id: string, masterKey: Uint8Array): Promise<GroupRecord | "not a member"> {
+		const running = this.#newGroupFetches.get(id);
+		if (running?.generation === generation) return running.promise;
+		const promise = (async (): Promise<GroupRecord | "not a member"> => {
 			this.#stillCurrent(generation);
-			const g: GroupRecord = { id, masterKey: toBase64(masterKey), source: "message", ...state };
-			await dir.putGroup(g);
-			this.#notOurGroups.delete(id);
-			return g;
-		} catch (e) {
-			if (e instanceof GroupFetchError && notAMember(e)) {
-				remember(this.#notOurGroups, id, Date.now() + NOT_OUR_GROUP_MS);
-				return "not a member";
+			const dir = await this.#directoryFor(generation);
+			try {
+				const state = await fetchGroupState(masterKey, await this.#groupCredential());
+				const g: GroupRecord = { id, masterKey: toBase64(masterKey), source: "message", ...state };
+				await dir.putGroup(g); // refused if the account was forgotten meanwhile
+				this.#notOurGroups.delete(id);
+				return g;
+			} catch (e) {
+				if (e instanceof GroupFetchError && notAMember(e)) {
+					this.#stillCurrent(generation);
+					remember(this.#notOurGroups, id, Date.now() + NOT_OUR_GROUP_MS);
+					return "not a member";
+				}
+				throw e;
 			}
-			throw e;
-		}
+		})().finally(() => {
+			if (this.#newGroupFetches.get(id)?.promise === promise) this.#newGroupFetches.delete(id);
+		});
+		this.#newGroupFetches.set(id, { generation, promise });
+		return promise;
 	}
 
 	/**
@@ -1469,7 +1484,7 @@ export class SignalClient {
 	 * someone a member. Our own devices' messages (sync transcripts) are kept. A group whose members
 	 * can't be learned right now (network) keeps its messages rather than losing real ones.
 	 */
-	async #dropNonMembers(parsed: ParsedContent, sender: string, self: Self): Promise<void> {
+	async #dropNonMembers(generation: number, parsed: ParsedContent, sender: string, self: Self): Promise<void> {
 		if (sender === self.aci) return;
 		const contexts = new Map(parsed.groups.map((g) => [groupIdFromMasterKey(g.masterKey), g] as const));
 		// A group context alone (no record, e.g. an empty DataMessage) is checked too: it would make us
@@ -1479,7 +1494,7 @@ export class SignalClient {
 		const allowed = new Set<string>();
 		for (const id of ids) {
 			const ctx = contexts.get(id);
-			const verdict = await this.#senderInGroup(id, ctx?.masterKey, ctx?.revision, sender);
+			const verdict = await this.#senderInGroup(generation, id, ctx?.masterKey, ctx?.revision, sender);
 			if (verdict !== "not a member") allowed.add(id);
 			else this.#count("ignored:group message from a non-member");
 		}
@@ -1487,18 +1502,19 @@ export class SignalClient {
 	}
 
 	/**
-	 * Fetches one group's state from the groups server and stores it. Shares a fetch already in flight,
-	 * unless it started before `notBefore`: then a new one follows it. 403/404 (we aren't in the group
-	 * any more) are stored as `fetchError`; other failures throw and leave the record as it was.
+	 * Fetches one group's state from the groups server and stores it, for the account of `generation`.
+	 * Shares a fetch already in flight for it, unless that started before `notBefore`: then a new one
+	 * follows. 403/404 (we aren't in the group any more) are stored as `fetchError`; other failures
+	 * throw and leave the record as it was.
 	 */
-	#refreshGroup(g: GroupRecord, notBefore = 0): Promise<GroupRecord> {
+	#refreshGroup(g: GroupRecord, notBefore = 0, generation = this.#generation): Promise<GroupRecord> {
 		const running = this.#groupRefreshes.get(g.id);
-		if (running && running.startedAt >= notBefore) return running.promise;
-		if (running) return running.promise.catch(() => undefined).then(() => this.#refreshGroup(g, notBefore));
+		if (running && running.generation === generation && running.startedAt >= notBefore) return running.promise;
+		if (running) return running.promise.catch(() => undefined).then(() => this.#refreshGroup(g, notBefore, generation));
 		const startedAt = Date.now();
 		const promise = (async () => {
-			const generation = this.#generation;
-			const dir = await this.directory();
+			this.#stillCurrent(generation);
+			const dir = await this.#directoryFor(generation);
 			let state: Partial<GroupRecord>;
 			try {
 				state = { ...(await fetchGroupState(fromBase64(g.masterKey), await this.#groupCredential())), fetchError: undefined };
@@ -1506,15 +1522,14 @@ export class SignalClient {
 				if (!(e instanceof GroupFetchError && notAMember(e))) throw e;
 				state = { fetchError: e.message, fetchedAt: Date.now() };
 			}
-			this.#stillCurrent(generation);
-			// Storage flags may have changed while we were fetching.
+			// Storage flags may have changed while we were fetching. Both refused once the account is forgotten.
 			const next: GroupRecord = { ...((await dir.group(g.id)) ?? g), ...state };
 			await dir.putGroup(next);
 			return next;
 		})().finally(() => {
 			if (this.#groupRefreshes.get(g.id)?.promise === promise) this.#groupRefreshes.delete(g.id);
 		});
-		this.#groupRefreshes.set(g.id, { startedAt, promise });
+		this.#groupRefreshes.set(g.id, { generation, startedAt, promise });
 		return promise;
 	}
 
@@ -1547,6 +1562,11 @@ export class SignalClient {
 	/** Groups and contacts as stored (lower level than groups()/contacts(); includes keys). */
 	directory(): Promise<Directory> {
 		return this.#sealer().then((s) => new Directory(this.#accountDb, s));
+	}
+
+	/** The directory as work for `generation` may use it (refused once that account is forgotten). */
+	#directoryFor(generation: number): Promise<Directory> {
+		return this.#sealer().then((s) => new Directory(this.#databaseFor(generation), s));
 	}
 
 	/**
@@ -1584,7 +1604,10 @@ export class SignalClient {
 		};
 	}
 
-	/** Counters and errors kept across restarts; work of a forgotten account can't record any. */
+	/**
+	 * Counters and errors kept across restarts. Not recorded while a reset is in progress; callers that
+	 * may run for a forgotten account check their generation first (or their errors are AccountForgotten).
+	 */
 	#lasting(record: (c: Counters) => void): void {
 		try {
 			record(this.#counters());
@@ -1705,10 +1728,10 @@ export class SignalClient {
 			const a = await this.#loadSecrets();
 			const sealer = await this.#sealer();
 			const stores: Partial<Record<OurIdentity, ProtocolStore>> = {
-				aci: await ProtocolStore.load(this.#accountDb, sealer, "aci", fromBase64(a.aciIdentityKeyPair), a.registrationId),
+				aci: await ProtocolStore.load(this.#databaseFor(generation), sealer, "aci", fromBase64(a.aciIdentityKeyPair), a.registrationId),
 			};
 			if (a.pniIdentityKeyPair && a.pniRegistrationId !== undefined) {
-				stores.pni = await ProtocolStore.load(this.#accountDb, sealer, "pni", fromBase64(a.pniIdentityKeyPair), a.pniRegistrationId);
+				stores.pni = await ProtocolStore.load(this.#databaseFor(generation), sealer, "pni", fromBase64(a.pniIdentityKeyPair), a.pniRegistrationId);
 			}
 			await this.#migrateLinkKeys(generation, a, stores);
 			return stores;

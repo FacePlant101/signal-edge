@@ -54,9 +54,9 @@ export class SignalSocket {
 			s.request("GET", "/v1/keepalive").then(
 				() => (failures = 0),
 				() => {
-					// A handler busy since the keepalive went out kept its answer from being read: not a
-					// sign of a dead connection.
-					if (s.#handling || s.#handledAt >= sentAt) return void (failures = 0);
+					// A handler busy since the keepalive went out kept its answer from being read: this one
+					// proves nothing either way (earlier failures still count).
+					if (s.#handling || s.#handledAt >= sentAt) return;
 					if (++failures >= KEEPALIVE_FAILURES) void s.close().catch(() => {});
 				},
 			);

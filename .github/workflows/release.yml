@@ -22,7 +22,7 @@ jobs:
           git merge-base --is-ancestor "$GITHUB_SHA" origin/main
       - uses: actions/setup-node@v7
         with:
-          node-version: 24
+          node-version-file: .nvmrc
       - run: npm ci --ignore-scripts
       - run: npm run typecheck
       - run: npm test
@@ -44,8 +44,8 @@ jobs:
     steps:
       - uses: actions/setup-node@v7
         with:
-          # Node 24 ships npm 11, which trusted publishing needs.
-          node-version: 24
+          # The release Node version; this job has no checkout, so it is named here (keep it equal to .nvmrc).
+          node-version: 26
           registry-url: https://registry.npmjs.org
       - uses: actions/download-artifact@v8
         with:

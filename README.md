@@ -98,7 +98,7 @@ Things to know on Workers:
 
 ## Node.js
 
-Node 22.13 or later. `signal-edge/node` sets up TCP (`node:net`) and the WASM modules, stores everything in a SQLite file, and runs maintenance on a timer:
+Node 22.13 or later (CI tests 22, 24 and 26; 26 is the default, see `.nvmrc`). `signal-edge/node` sets up TCP (`node:net`) and the WASM modules, stores everything in a SQLite file, and runs maintenance on a timer:
 
 ```js
 import { createNodeClient } from "signal-edge/node";

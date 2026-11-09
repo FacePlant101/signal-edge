@@ -1,0 +1,81 @@
+{
+	"name": "signal-edge",
+	"version": "0.2.0",
+	"description": "A Signal linked-device client for Cloudflare Workers and Node.js: userland TLS pinned to Signal's CA, libsignal sessions, sealed sender, sender keys, groups, attachments, persistence in SQLite.",
+	"license": "AGPL-3.0-only",
+	"author": "FacePlant101",
+	"keywords": [
+		"signal",
+		"signal-protocol",
+		"libsignal",
+		"cloudflare-workers",
+		"durable-objects",
+		"wasm",
+		"end-to-end-encryption",
+		"linked-device"
+	],
+	"homepage": "https://github.com/FacePlant101/signal-edge#readme",
+	"bugs": {
+		"url": "https://github.com/FacePlant101/signal-edge/issues"
+	},
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/FacePlant101/signal-edge.git"
+	},
+	"type": "module",
+	"exports": {
+		".": {
+			"types": "./dist/index.d.ts",
+			"default": "./dist/index.js"
+		},
+		"./workers": {
+			"types": "./dist/workers.d.ts",
+			"default": "./dist/workers.js"
+		},
+		"./node": {
+			"types": "./dist/node.d.ts",
+			"default": "./dist/node.js"
+		},
+		"./selftest": {
+			"types": "./dist/selftest/index.d.ts",
+			"default": "./dist/selftest/index.js"
+		},
+		"./wasm/*": "./dist/vendor/*"
+	},
+	"files": [
+		"dist",
+		"LICENSE",
+		"NOTICE",
+		"THIRD_PARTY_LICENSES.txt",
+		"CHANGELOG.md",
+		"README.md"
+	],
+	"sideEffects": [
+		"./dist/workers.js",
+		"./dist/node.js"
+	],
+	"engines": {
+		"node": ">=22.13"
+	},
+	"scripts": {
+		"build": "rm -rf dist dist-node && tsc -p tsconfig.build.json && tsc -p tsconfig.node.json && node scripts/copy-vendor.mjs",
+		"typecheck": "tsc --noEmit",
+		"test": "npm run build && node --test --test-reporter=spec test/*.test.mjs",
+		"prepare": "npm run build",
+		"build:tls": "bash scripts/build-tls.sh",
+		"build:sealed": "bash scripts/build-sealed.sh",
+		"prepublishOnly": "npm run typecheck && npm test"
+	},
+	"dependencies": {
+		"@getmaapp/signal-wasm": "0.6.6"
+	},
+	"devDependencies": {
+		"@cloudflare/workers-types": "^5.20261103.1",
+		"@types/node": "^22.10.0",
+		"typescript": "^5.9.3"
+	},
+	"publishConfig": {
+		"access": "public",
+		"provenance": true
+	}
+}

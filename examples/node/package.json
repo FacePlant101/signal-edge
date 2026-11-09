@@ -1,0 +1,10 @@
+{
+	"name": "signal-edge-example-node",
+	"private": true,
+	"type": "module",
+	"engines": { "node": ">=22.13" },
+	"bin": { "signal": "./signal.mjs" },
+	"dependencies": {
+		"signal-edge": "file:../.."
+	}
+}

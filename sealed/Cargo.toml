@@ -1,0 +1,33 @@
+[package]
+name = "signal-sealed"
+version = "0.1.0"
+edition = "2024"
+publish = false
+license = "AGPL-3.0-only"
+description = "libsignal pieces signal-wasm lacks (sealed-sender unwrap, zkgroup) for Cloudflare Workers"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+# Pinned to a release tag; bump together with the trust roots in src/lib.rs if needed.
+libsignal-protocol = { git = "https://github.com/signalapp/libsignal", tag = "v0.106.1" }
+zkgroup = { git = "https://github.com/signalapp/libsignal", tag = "v0.106.1" }
+libsignal-core = { git = "https://github.com/signalapp/libsignal", tag = "v0.106.1" }
+libsignal-account-keys = { git = "https://github.com/signalapp/libsignal", tag = "v0.106.1" }
+wasm-bindgen = "=0.2.130"
+futures-util = { version = "0.3", default-features = false }
+# Same major version as libsignal-protocol's; OsRng draws from getrandom (crypto.getRandomValues).
+rand = { version = "0.9", default-features = false, features = ["os_rng"] }
+# wasm32-unknown-unknown: randomness from crypto.getRandomValues (see .cargo/config.toml).
+getrandom = { version = "0.3", features = ["wasm_js"] }
+getrandom_04 = { package = "getrandom", version = "0.4", features = ["wasm_js"] }
+# getrandom 0.2 (via argon2 in libsignal-account-keys) calls it "js".
+getrandom_02 = { package = "getrandom", version = "0.2", features = ["js"] }
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = "debuginfo"

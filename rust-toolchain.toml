@@ -1,0 +1,7 @@
+# The prebuilt WASM in src/vendor/ is built by .github/workflows/wasm.yml with exactly this toolchain
+# (plus wasm-bindgen-cli 0.2.130 and Ubuntu 24.04's clang 18, llvm-ar and protoc), and CI checks that a
+# rebuild reproduces the committed files byte for byte. Change these together.
+[toolchain]
+channel = "1.97.0"
+targets = ["wasm32-unknown-unknown"]
+profile = "minimal"

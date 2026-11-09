@@ -1,0 +1,17 @@
+{
+	"extends": "./tsconfig.build.json",
+	"compilerOptions": {
+		"types": [
+			"node"
+		],
+		"lib": [
+			"es2023",
+			"dom"
+		],
+		"outDir": "dist-node"
+	},
+	"include": [
+		"src/node.ts"
+	],
+	"exclude": []
+}

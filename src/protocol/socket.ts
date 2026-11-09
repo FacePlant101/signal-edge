@@ -24,12 +24,17 @@ export class SignalSocket {
 	#nextId = 1n;
 	#pending = new Map<bigint, { resolve: (r: WsResponse) => void; reject: (e: Error) => void }>();
 	#keepalive?: ReturnType<typeof setInterval>;
+	#closed = false;
 
 	static async connect(path: string, handlers: SignalSocketHandlers, headers: Record<string, string> = {}): Promise<SignalSocket> {
 		const s = new SignalSocket();
-		s.#ws = await WsClient.connect(CHAT_HOST, path, headers, {
+		await WsClient.connect(CHAT_HOST, path, headers, {
+			// Set before any message is handled: the server's first request can arrive with the upgrade
+			// response, and answering it needs the socket.
+			onOpen: (ws) => (s.#ws = ws),
 			onMessage: (data) => s.#onMessage(data, handlers),
 			onClose: (code, reason) => {
+				s.#closed = true;
 				if (s.#keepalive) clearInterval(s.#keepalive);
 				for (const p of s.#pending.values()) p.reject(new Error(`socket closed: ${code} ${reason}`));
 				s.#pending.clear();
@@ -39,6 +44,7 @@ export class SignalSocket {
 		// A half-open connection never errors by itself: close it when keepalives go unanswered, so the
 		// owner sees onClose and reconnects.
 		let failures = 0;
+		if (s.#closed) return s; // closed while connecting: onClose has run, no keepalive to start
 		s.#keepalive = setInterval(() => {
 			s.request("GET", "/v1/keepalive").then(
 				() => (failures = 0),

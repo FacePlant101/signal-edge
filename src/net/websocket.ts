@@ -16,6 +16,11 @@ const MAX_MESSAGE = 16 * 1024 * 1024;
 const CONNECT_TIMEOUT_MS = 30_000;
 
 export type WsHandlers = {
+	/**
+	 * Called with the client before the first message is read: a message can arrive together with the
+	 * upgrade response, and its handler may need to answer before connect() has resolved.
+	 */
+	onOpen?: (ws: WsClient) => void;
 	onMessage: (data: Uint8Array) => void | Promise<void>;
 	onClose: (code: number, reason: string) => void;
 };
@@ -73,6 +78,7 @@ export class WsClient {
 				throw new Error("WebSocket: bad Sec-WebSocket-Accept");
 			}
 			const ws = new WsClient(sock);
+			handlers.onOpen?.(ws);
 			void ws.#readLoop(q, handlers);
 			return ws;
 		} catch (e) {

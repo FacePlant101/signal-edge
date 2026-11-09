@@ -69,10 +69,18 @@ export class MessageStore {
 	}
 
 	/** The newest stored message or edit in `conversation` with this timestamp (the id shown to MCP clients). */
-	async findSent(conversation: string, sentAt: number): Promise<StoredMessage | undefined> {
-		const row = this.sql
-			.exec<Row>("SELECT id, conversation, author, sent_at, received_at, kind, data FROM messages WHERE conversation = ? AND sent_at = ? AND kind = 'message' ORDER BY id DESC LIMIT 1", conversation, sentAt)
-			[0];
+	async findSent(conversation: string, sentAt: number, author?: string): Promise<StoredMessage | undefined> {
+		// sentAt is the sender's word: with an author, another sender's message at the same time can't stand in.
+		const row = (
+			author === undefined
+				? this.sql.exec<Row>("SELECT id, conversation, author, sent_at, received_at, kind, data FROM messages WHERE conversation = ? AND sent_at = ? AND kind = 'message' ORDER BY id DESC LIMIT 1", conversation, sentAt)
+				: this.sql.exec<Row>(
+						"SELECT id, conversation, author, sent_at, received_at, kind, data FROM messages WHERE conversation = ? AND sent_at = ? AND author = ? AND kind = 'message' ORDER BY id DESC LIMIT 1",
+						conversation,
+						sentAt,
+						author,
+					)
+		)[0];
 		return row && this.get(row.id);
 	}
 

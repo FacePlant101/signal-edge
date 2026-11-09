@@ -96,7 +96,7 @@ test("a padded identity key in a PreKey message is checked on its first 33 bytes
 test("the sealed-sender group id doesn't put a message into a group", () => {
 	const data = encodeProto([[1, "hello"], [7, 1700000000000]]); // DataMessage body + timestamp, no group context
 	const content = encodeProto([[1, data]]);
-	const parsed = parseContent(content, "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", 1, "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", bytes(32, 9));
+	const parsed = parseContent(content, "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", 1, "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb");
 	assert.equal(parsed.records[0]?.conversation, "aci:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
 });
 
@@ -177,4 +177,53 @@ test("the self-tests refuse a database that holds an account", async () => {
 	const sealer = await Sealer.fromBase64(TEST_STORAGE_KEY);
 	await assert.rejects(storeSelfTest(db, sealer), /refusing/);
 	await assert.rejects(receiverSelfTest(db, sealer), /refusing/);
+});
+
+// --- Review follow-ups ---
+
+test("other people's sender keys are capped in the database and in memory; ours aren't", async () => {
+	const { ProtocolStore, createStoreSchema } = await import("../dist/protocol/store.js");
+	const { signal } = await import("../dist/protocol/wasm.js");
+	const sig = signal();
+	const db = memoryDb();
+	createStoreSchema(db);
+	const sealer = await Sealer.fromBase64(TEST_STORAGE_KEY);
+	const priv = sig.WasmPrivateKey.generate();
+	const pair = new sig.WasmIdentityKeyPair(priv.getPublicKey(), sig.WasmPrivateKey.deserialize(priv.serialize())).serialize();
+	const store = await ProtocolStore.load(db, sealer, "aci", pair, 1);
+	const them = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+	const us = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+	const addr = (n, d) => new sig.WasmProtocolAddress(n, d);
+	const theirStore = new sig.WasmInMemSenderKeyStore();
+	const theirs = [];
+	for (let i = 0; i < 260; i++) {
+		const id = crypto.randomUUID();
+		theirs.push(id);
+		const skdm = await sig.createSenderKeyDistribution(addr(them, 1), id, theirStore);
+		await sig.processSenderKeyDistribution(addr(them, 1), skdm, store.senderKeys);
+		await store.saveSenderKey(them, 1, id);
+	}
+	const rows = (a) => db.exec("SELECT COUNT(*) AS n FROM sender_keys WHERE address = ?", a)[0].n;
+	assert.equal(rows(`${them}.1`), 256);
+	assert.equal(await store.senderKeys.export_sender_key(addr(them, 1), theirs[0]), undefined, "the least recently used key left memory too");
+	assert.ok(await store.senderKeys.export_sender_key(addr(them, 1), theirs[259]));
+	for (let i = 0; i < 260; i++) {
+		const id = crypto.randomUUID();
+		await sig.createSenderKeyDistribution(addr(us, 3), id, store.senderKeys);
+		await store.saveSenderKey(us, 3, id, true);
+	}
+	assert.equal(rows(`${us}.3`), 260);
+});
+
+test("a quoted message is looked up by its author too, not just its timestamp", async () => {
+	const { MessageStore, createMessageSchema } = await import("../dist/protocol/messages.js");
+	const db = memoryDb();
+	createMessageSchema(db);
+	const messages = new MessageStore(db, await Sealer.fromBase64(TEST_STORAGE_KEY));
+	const conversation = "group:AAAA";
+	const record = (author, body) => ({ kind: "message", conversation, author, authorDevice: 1, outgoing: false, sentAt: 1_700_000_000_000, body });
+	await messages.add([record("cccccccc-cccc-4ccc-8ccc-cccccccccccc", "real")], "g1", 1);
+	await messages.add([record("dddddddd-dddd-4ddd-8ddd-dddddddddddd", "same timestamp")], "g2", 2);
+	assert.equal((await messages.findSent(conversation, 1_700_000_000_000, "cccccccc-cccc-4ccc-8ccc-cccccccccccc"))?.body, "real");
+	assert.equal(await messages.findSent(conversation, 1_700_000_000_000, "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee"), undefined);
 });

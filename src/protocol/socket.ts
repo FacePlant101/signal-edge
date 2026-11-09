@@ -25,6 +25,10 @@ export class SignalSocket {
 	#pending = new Map<bigint, { resolve: (r: WsResponse) => void; reject: (e: Error) => void }>();
 	#keepalive?: ReturnType<typeof setInterval>;
 	#closed = false;
+	/** Server requests being handled: the read loop waits for each, so responses can't be read meanwhile. */
+	#handling = 0;
+	/** When the last server request finished being handled. */
+	#handledAt = 0;
 
 	static async connect(path: string, handlers: SignalSocketHandlers, headers: Record<string, string> = {}): Promise<SignalSocket> {
 		const s = new SignalSocket();
@@ -46,9 +50,13 @@ export class SignalSocket {
 		let failures = 0;
 		if (s.#closed) return s; // closed while connecting: onClose has run, no keepalive to start
 		s.#keepalive = setInterval(() => {
+			const sentAt = Date.now();
 			s.request("GET", "/v1/keepalive").then(
 				() => (failures = 0),
 				() => {
+					// A handler busy since the keepalive went out kept its answer from being read: not a
+					// sign of a dead connection.
+					if (s.#handling || s.#handledAt >= sentAt) return void (failures = 0);
 					if (++failures >= KEEPALIVE_FAILURES) void s.close().catch(() => {});
 				},
 			);
@@ -91,9 +99,12 @@ export class SignalSocket {
 			this.#pending.delete(response.id);
 		} else if (request) {
 			let status = 500;
+			this.#handling++;
 			try {
 				status = await handlers.onRequest(request);
 			} finally {
+				this.#handling--;
+				this.#handledAt = Date.now();
 				await this.#ws.send(encodeWsResponse({ id: request.id, status, message: status === 200 ? "OK" : "Error", headers: [] }));
 			}
 		}

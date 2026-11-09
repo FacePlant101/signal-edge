@@ -98,7 +98,8 @@ export async function receiveEnvelope(
 		return { status: "ignored", reason: `unknown message type ${type}` };
 	}
 
-	let parsed = parseContent(plaintext, sender, device, self.aci, sealedGroupId);
+	// The sealed layer's group id is the sender's word and routes nothing; retry requests keep it (above).
+	let parsed = parseContent(plaintext, sender, device, self.aci);
 	// PlaintextContent isn't end-to-end authenticated: as Desktop, use only its DecryptionErrorMessage.
 	if (type === CIPHERTEXT.PLAINTEXT) {
 		parsed = { records: [], decryptionError: parsed.decryptionError, kinds: parsed.decryptionError ? ["decryption-error"] : ["plaintext:ignored"], groups: [], timers: [] };

@@ -159,6 +159,11 @@ export function pruneRetryState(sql: SqlDatabase, now = Date.now()): void {
 export class Limiter {
 	#hits = new Map<string, { windowMs: number; at: number[] }>();
 
+	/** Whether allow() would let one more hit through, without counting it. */
+	wouldAllow(limits: { key: string; max: number; windowMs: number }[], now = Date.now()): boolean {
+		return limits.every((l) => (this.#hits.get(l.key)?.at ?? []).filter((t) => now - t < l.windowMs).length < l.max);
+	}
+
 	/** Allows (and counts) one hit only if every limit has room, so a refusal uses up none of them. */
 	allow(limits: { key: string; max: number; windowMs: number }[], now = Date.now()): boolean {
 		const current = limits.map((l) => ({ ...l, at: (this.#hits.get(l.key)?.at ?? []).filter((t) => now - t < l.windowMs) }));

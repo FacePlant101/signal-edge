@@ -211,7 +211,7 @@ export type GroupContext = { masterKey: Uint8Array; revision: number };
  * sealed-sender layer's group id is chosen by the sender alone and isn't used for routing. Whether
  * the sender is a member is the caller's check (SignalClient does it before storing).
  */
-export function parseContent(plaintext: Uint8Array, sender: string, senderDevice: number, ourAci: string, _sealedGroupId?: Uint8Array): ParsedContent {
+export function parseContent(plaintext: Uint8Array, sender: string, senderDevice: number, ourAci: string): ParsedContent {
 	const c = new Decoded(plaintext);
 	const out: ParsedContent = { records: [], senderKeyDistribution: c.bytes(7), decryptionError: c.bytes(8), kinds: [], groups: [], timers: [] };
 

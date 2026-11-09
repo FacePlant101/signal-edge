@@ -415,6 +415,7 @@ export class SignalClient {
 		await this.#socket?.close().catch(() => {});
 		const chat = this.#chat;
 		this.#chat = undefined;
+		this.#connecting = undefined; // a connect in flight is the forgotten account's; it closes its socket itself
 		await chat?.close().catch(() => {});
 		// Let protocol work holding the lock wind down (its requests were aborted and its writes fail);
 		// work queued behind it sees the new generation and stops. Waiting is only for tidiness.
@@ -541,14 +542,18 @@ export class SignalClient {
 				this.#receive.connected = true;
 				this.#receive.connectedAt = Date.now();
 			} catch (e) {
+				if (generation !== this.#generation) throw e; // a connect of the forgotten account: not this one's state
 				this.#receive.lastError = `${new Date().toISOString()} connect: ${e}`;
 				this.#lasting((c) => c.error("connect", String(e)));
 				// 401/403 on the upgrade: the device was removed or the password is wrong. Retrying won't help.
 				if (/HTTP 40[13]\b/.test(String(e))) this.#receive.authFailed = true;
 				throw e;
 			}
-		})().finally(() => (this.#connecting = undefined));
-		return this.#connecting;
+		})().finally(() => {
+			if (this.#connecting === connecting) this.#connecting = undefined;
+		});
+		const connecting = this.#connecting;
+		return connecting;
 	}
 
 	async #onChatRequest(
@@ -1330,9 +1335,14 @@ export class SignalClient {
 		for (const rec of records) {
 			const q = rec.quote;
 			if (!q) continue;
-			const stored = q.id !== undefined ? await messages.findSent(rec.conversation, q.id) : undefined;
-			if (stored && stored.author === q.author) {
+			const stored = q.id !== undefined && q.author ? await messages.findSent(rec.conversation, q.id, q.author) : undefined;
+			if (stored) {
+				// Text and mentions both from what was stored: the sender's ranges could put other names on
+				// the stored text's placeholders.
 				q.text = stored.body !== undefined ? truncateUtf8(stored.body, MAX_TEXT_BYTES) : undefined;
+				const mentions = q.text === undefined ? [] : validMentions(q.text, stored.mentions);
+				if (mentions.length) q.mentions = mentions;
+				else delete q.mentions;
 				q.verified = true;
 			} else {
 				q.verified = false;
@@ -1356,11 +1366,10 @@ export class SignalClient {
 	async #noteGroup(masterKey: Uint8Array, revision: number): Promise<void> {
 		const id = groupIdFromMasterKey(masterKey);
 		const now = Date.now();
-		if ((this.#notOurGroups.get(id) ?? 0) > now) return;
 		if (now - (this.#groupNotedAt.get(id) ?? 0) < GROUP_REVISION_REFETCH_MS) return;
 		const known = await (await this.directory()).group(id);
 		if (known?.revision !== undefined && known.revision >= revision) return;
-		if (!known && !this.#newGroupBudget()) return;
+		if (!known && ((this.#notOurGroups.get(id) ?? 0) > now || this.#newGroupBudget() !== true)) return;
 		remember(this.#groupNotedAt, id, now);
 		if (known) await this.#refreshGroup(known);
 		else await this.#fetchNewGroup(id, masterKey);
@@ -1376,8 +1385,9 @@ export class SignalClient {
 	 */
 	async #senderInGroup(id: string, masterKey: Uint8Array | undefined, revision: number | undefined, sender: string): Promise<"member" | "not a member" | "unknown"> {
 		const askedAt = Date.now();
-		if ((this.#notOurGroups.get(id) ?? 0) > askedAt) return "not a member";
 		const known = await (await this.directory()).group(id);
+		// A group the server lately said we aren't in, unless it has been stored since (we joined).
+		if (!known && (this.#notOurGroups.get(id) ?? 0) > askedAt) return "not a member";
 		const verdict = (g: GroupRecord | undefined) => {
 			if (g?.fetchError) return "not a member"; // the server says we're out of it: nothing from it counts
 			if (!g?.members) return "unknown";
@@ -1388,9 +1398,19 @@ export class SignalClient {
 		const key = `${id} ${sender}`;
 		// Asked lately: the answer then (a group we aren't in is in #notOurGroups) or what is stored.
 		if (askedAt - (this.#memberChecks.get(key) ?? 0) < GROUP_MEMBER_CHECK_MS) return verdict(known);
-		if (!known && (!masterKey || !this.#newGroupBudget(sender))) {
-			this.#count("ignored:group fetch budget used up");
-			return "not a member";
+		if (!known) {
+			if (!masterKey) return "not a member";
+			const budget = this.#newGroupBudget(sender);
+			// This sender named more new groups than anyone joins in an hour: theirs are dropped. When the
+			// overall budget is what ran out, the message is kept, as when the server can't be reached.
+			if (budget === "sender") {
+				this.#count("ignored:too many new groups from one sender");
+				return "not a member";
+			}
+			if (budget === "overall") {
+				this.#count("receive:group not checked (fetch budget used up)");
+				return "unknown";
+			}
 		}
 		remember(this.#memberChecks, key, askedAt);
 		try {
@@ -1404,11 +1424,19 @@ export class SignalClient {
 		}
 	}
 
-	/** One more fetch of a group we don't know yet, within the per-sender and overall hourly budgets. */
-	#newGroupBudget(sender?: string): boolean {
-		const limits = [{ key: "new", max: NEW_GROUP_FETCHES_PER_HOUR, windowMs: HOUR_MS }];
-		if (sender) limits.push({ key: `new:${sender}`, max: NEW_GROUP_FETCHES_PER_SENDER_HOUR, windowMs: HOUR_MS });
-		return this.#groupLimits.allow(limits);
+	/**
+	 * One more fetch of a group we don't know yet, within the hourly budgets: true, or which budget is
+	 * used up ("sender": this sender's; "overall").
+	 */
+	#newGroupBudget(sender?: string): true | "sender" | "overall" {
+		const overall = { key: "new", max: NEW_GROUP_FETCHES_PER_HOUR, windowMs: HOUR_MS };
+		if (sender) {
+			const own = { key: `new:${sender}`, max: NEW_GROUP_FETCHES_PER_SENDER_HOUR, windowMs: HOUR_MS };
+			if (this.#groupLimits.allow([own, overall])) return true;
+			// Refused: say which budget did it.
+			return this.#groupLimits.wouldAllow([own]) ? "overall" : "sender";
+		}
+		return this.#groupLimits.allow([overall]) ? true : "overall";
 	}
 
 	/**
@@ -1424,6 +1452,7 @@ export class SignalClient {
 			this.#stillCurrent(generation);
 			const g: GroupRecord = { id, masterKey: toBase64(masterKey), source: "message", ...state };
 			await dir.putGroup(g);
+			this.#notOurGroups.delete(id);
 			return g;
 		} catch (e) {
 			if (e instanceof GroupFetchError && notAMember(e)) {
@@ -1442,9 +1471,11 @@ export class SignalClient {
 	 */
 	async #dropNonMembers(parsed: ParsedContent, sender: string, self: Self): Promise<void> {
 		if (sender === self.aci) return;
-		const ids = groupsNamed(parsed);
-		if (!ids.size) return;
 		const contexts = new Map(parsed.groups.map((g) => [groupIdFromMasterKey(g.masterKey), g] as const));
+		// A group context alone (no record, e.g. an empty DataMessage) is checked too: it would make us
+		// fetch the group's state afterwards.
+		const ids = new Set([...groupsNamed(parsed), ...contexts.keys()]);
+		if (!ids.size) return;
 		const allowed = new Set<string>();
 		for (const id of ids) {
 			const ctx = contexts.get(id);
@@ -1891,10 +1922,6 @@ function basicAuth(user: string, password: string): string {
 	return `Basic ${btoa(`${user}:${password}`)}`;
 }
 
-/**
- * Context for sendToServiceId with our ACI store; pass `sendLog` for messages that may be resent,
- * and `sealing` (SignalClient.#sealing) for sends that may go sealed sender.
- */
 /** The groups server's answer that we aren't in a group (as opposed to trouble reaching it). */
 function notAMember(e: GroupFetchError): boolean {
 	return e.status === 403 || e.status === 404;

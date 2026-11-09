@@ -136,11 +136,16 @@ export class TlsSocket {
 	async close(): Promise<void> {
 		if (this.#closed) return;
 		this.#closed = true;
+		// close_notify, best effort: it queues behind earlier writes, and a stalled one (a peer that stopped
+		// reading) mustn't keep the connection open. Closing the raw socket ends such writes too.
+		let timer: ReturnType<typeof setTimeout> | undefined;
 		try {
 			this.#tls.close();
-			await this.#flush();
+			await Promise.race([this.#flush(), new Promise((r) => (timer = setTimeout(r, CLOSE_NOTIFY_WAIT_MS)))]);
 		} catch {
-			// Best effort: the peer may already be gone.
+			// The peer may already be gone.
+		} finally {
+			if (timer !== undefined) clearTimeout(timer);
 		}
 		this.#tls.free();
 		await this.#socket.close().catch(() => {});
@@ -170,6 +175,8 @@ export class TlsSocket {
 // On the deployed edge a single socket write above 64 KiB drops the connection ("Network
 // connection lost"); local workerd doesn't. Write at most one TLS record's worth at a time.
 const MAX_SOCKET_WRITE = 16 * 1024;
+/** close() waits at most this long for close_notify to go out. */
+const CLOSE_NOTIFY_WAIT_MS = 1_000;
 
 async function write(writer: WritableStreamDefaultWriter<Uint8Array>, bytes: Uint8Array): Promise<void> {
 	for (let off = 0; off < bytes.length; off += MAX_SOCKET_WRITE) {

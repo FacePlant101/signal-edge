@@ -16,7 +16,7 @@ A Signal linked-device client library, Workers first, runtime-pluggable. Extract
 - **Compatibility with existing data:** table names, columns, kv keys and Sealer AAD labels (`account_secrets`, `sender_certificate|aci.device`, `table|identity|key`, …) must stay as they are, or existing deployments' linked accounts stop working. Add migrations, don't rename.
 - Relative imports end in `.js` (module `nodenext`); the build is plain `tsc`.
 - Anything talking to Signal goes through `signalFetch`/`SignalSocket` (pinned TLS), never `fetch()`, except CDN redirects to non-signal.org hosts.
-- Run `npm run typecheck` and `npm test` before committing; after changing `tls/` or `sealed/`, rebuild (`npm run build:tls` / `build:sealed`) and commit `src/vendor/`.
+- Run `npm run typecheck` and `npm test` before committing. `src/vendor/` must be exactly what `.github/workflows/wasm.yml` builds (reproducible: `rust-toolchain.toml`, wasm-bindgen-cli 0.2.130, Ubuntu 24.04 clang 18, paths remapped by the build scripts); after changing `tls/` or `sealed/`, rebuild with that toolchain or run the workflow with `commit=true`, and never commit binaries built any other way.
 - No key material, account data or real phone numbers in tests or fixtures. Live tests only with a throwaway number.
 - AGPL-3.0-only (libsignal). Credits live in NOTICE and README "Credits"; after any `Cargo.lock` change, run `python3 scripts/third-party-licenses.py` and commit `THIRD_PARTY_LICENSES.txt` (it ships with the prebuilt WASM).
 

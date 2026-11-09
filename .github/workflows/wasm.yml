@@ -1,0 +1,79 @@
+name: WASM
+# Builds src/vendor/ (tls/ and sealed/ compiled to WebAssembly) from source and checks that the committed
+# files are exactly what this workflow builds. The build is reproducible: pinned toolchain
+# (rust-toolchain.toml, wasm-bindgen-cli 0.2.130, Ubuntu 24.04's clang 18) and local paths mapped away.
+# - pull requests / pushes touching the Rust code, the build or the vendored files: rebuild and compare;
+#   on a mismatch the job fails and the rebuilt files are attached as the "vendor" artifact.
+# - push to main: also records a build provenance attestation for each .wasm
+#   (verify with: gh attestation verify src/vendor/signal-tls/signal_tls_bg.wasm -R FacePlant101/signal-edge).
+# - workflow_dispatch with commit=true: rebuilds and commits src/vendor/ to the branch it runs on, for
+#   changes to tls/ or sealed/ made without a local Rust toolchain.
+on:
+  pull_request:
+    paths: ["tls/**", "sealed/**", "src/vendor/**", "scripts/build-*.sh", "rust-toolchain.toml", ".github/workflows/wasm.yml"]
+  push:
+    branches: [main]
+    paths: ["tls/**", "sealed/**", "src/vendor/**", "scripts/build-*.sh", "rust-toolchain.toml", ".github/workflows/wasm.yml"]
+  workflow_dispatch:
+    inputs:
+      commit:
+        description: Commit the rebuilt src/vendor/ to this branch
+        type: boolean
+        default: false
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write # only used by workflow_dispatch with commit=true
+      id-token: write # attestations on main
+      attestations: write
+    steps:
+      - uses: actions/checkout@v5
+      - name: Toolchain (rustc from rust-toolchain.toml, clang/llvm-ar/protoc from Ubuntu)
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q clang-18 llvm-18 protobuf-compiler
+          sudo ln -sf /usr/bin/clang-18 /usr/local/bin/clang
+          sudo ln -sf /usr/bin/llvm-ar-18 /usr/local/bin/llvm-ar
+          rustup show active-toolchain || rustup toolchain install
+          clang --version | head -1; protoc --version; rustc --version
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/wasm-bindgen
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+          key: wasm-${{ hashFiles('rust-toolchain.toml', 'tls/Cargo.lock', 'sealed/Cargo.lock') }}
+      - name: wasm-bindgen-cli 0.2.130
+        run: wasm-bindgen --version 2>/dev/null | grep -q '0.2.130' || cargo install wasm-bindgen-cli --version 0.2.130 --locked
+      - run: bash scripts/build-tls.sh
+      - run: bash scripts/build-sealed.sh
+      - run: sha256sum src/vendor/*/*.wasm
+      - name: Commit the rebuilt files
+        if: github.event_name == 'workflow_dispatch' && inputs.commit
+        run: |
+          git diff --quiet src/vendor && { echo "src/vendor/ is already up to date"; exit 0; }
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -am "Rebuild src/vendor/ (WASM workflow, run ${{ github.run_id }})"
+          git push
+      - name: The committed files are what this build produced
+        id: compare
+        if: github.event_name != 'workflow_dispatch' || !inputs.commit
+        run: |
+          if git diff --quiet src/vendor; then echo "src/vendor/ matches the build"; exit 0; fi
+          git diff --stat src/vendor
+          echo "::error::src/vendor/ differs from the CI build. Use the 'vendor' artifact of this run, or run this workflow with commit=true on the branch."
+          exit 1
+      - uses: actions/upload-artifact@v4
+        if: failure() && steps.compare.outcome == 'failure'
+        with:
+          name: vendor
+          path: src/vendor/
+      - uses: actions/attest-build-provenance@v2
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        with:
+          subject-path: src/vendor/*/*.wasm

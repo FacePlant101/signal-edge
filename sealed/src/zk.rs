@@ -63,6 +63,26 @@ pub fn receive_auth_credential(
     Ok(zkgroup::serialize(&credential))
 }
 
+/// The same for an account without a phone number (Signal Login): the server binds the credential
+/// to a PNI derived from our ACI and the account's auth credential salt (in the response to
+/// `POST /v1/registration` and `GET /v1/accounts/whoami`) instead of a real PNI.
+#[wasm_bindgen]
+pub fn receive_auth_credential_without_pni(
+    server_public_params: &[u8],
+    aci: &str,
+    auth_credential_salt: &[u8],
+    redemption_time_secs: f64,
+    response: &[u8],
+) -> Result<Vec<u8>, JsError> {
+    let params = server_params(server_public_params)?;
+    let aci = Aci::parse_from_service_id_string(aci).ok_or_else(|| JsError::new("invalid ACI"))?;
+    let response = AuthCredentialWithPniResponse::new(response).map_err(js_err)?;
+    let credential = response
+        .receive_without_pni(&params, aci, auth_credential_salt, Timestamp::from_epoch_seconds(redemption_time_secs as u64))
+        .map_err(js_err)?;
+    Ok(zkgroup::serialize(&credential))
+}
+
 /// Fresh presentation of `credential` for one group: the password half of the groups-server
 /// Basic auth (hex).
 #[wasm_bindgen]

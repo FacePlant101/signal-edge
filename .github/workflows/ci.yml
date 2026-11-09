@@ -3,18 +3,33 @@ on:
   push:
     branches: [main]
   pull_request:
+permissions:
+  contents: read
 jobs:
   test:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node: [22, 24]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
         with:
-          node-version: 22
+          node-version: ${{ matrix.node }}
           cache: npm
       - run: npm ci
       - run: npm run typecheck
+      # Unit tests and self-tests, plus test/network.test.mjs: real connections to Signal's servers
+      # (pinned TLS, provisioning socket), no account needed.
       - run: npm test
+        env:
+          SIGNAL_NETWORK_TESTS: "1"
       - name: Bundle the example Worker
+        if: matrix.node == 22
         working-directory: examples/worker
         run: npm ci && npm run check
+      - name: Run the example Node CLI
+        working-directory: examples/node
+        run: |
+          npm install --no-audit --no-fund
+          SIGNAL_STORAGE_KEY=$(openssl rand -base64 32) SIGNAL_DB=:memory: node signal.mjs status

@@ -11,3 +11,5 @@ examples/*/dist/
 # Never commit Signal account material
 *.db
 *.sqlite
+dist-node/
+examples/node/*.db*

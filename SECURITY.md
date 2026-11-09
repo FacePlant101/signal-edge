@@ -60,4 +60,4 @@ gh attestation verify src/vendor/signal-tls/signal_tls_bg.wasm -R FacePlant101/s
   --signer-workflow FacePlant101/signal-edge/.github/workflows/wasm.yml --source-ref refs/heads/main
 ```
 
-npm releases are published from tagged commits on `main` by `.github/workflows/release.yml`. The tarball that workflow tests is the one it publishes.
+npm releases are staged from tagged commits on `main` by `.github/workflows/release.yml` (the tarball it tests is the one it stages) and go public only after a maintainer approves them with 2FA.

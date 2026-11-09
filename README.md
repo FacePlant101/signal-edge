@@ -4,7 +4,7 @@ A Signal client that runs as a **linked device** (like Signal Desktop) inside Cl
 
 > **Unofficial.** This is not Signal's software, Signal doesn't support it, and it can break whenever Signal changes its servers. Try it with a spare number first. It handles real end-to-end-encrypted traffic and stores keys that can read it: treat the storage key like a password.
 
-Extracted from [signal-mcp-worker](https://github.com/FacePlant101/signal-mcp-worker), which runs on it against a real account (since 2026-11-09).
+It has run a real account in production on Cloudflare Workers since 2026-11-09.
 
 ## What works
 
@@ -17,7 +17,7 @@ Extracted from [signal-mcp-worker](https://github.com/FacePlant101/signal-mcp-wo
 | Contacts and groups (storage service, zkgroup credentials, group state) | verified on a real account |
 | Attachment download and decryption, long received texts | verified on a real account |
 | Safety-number changes (accepted like the apps do, recorded in the chat) | verified on Workers (self-test) |
-| Sealed-sender sends | accepted by Signal on a real account (signal-mcp-worker's replies) |
+| Sealed-sender sends | accepted by Signal on a real account |
 | Retry requests (resend after a failed decrypt) | self-test only; not yet seen on a real account |
 | Sending attachments and long texts (long-text attachment past 2000 bytes) | deployed; not yet seen by a real recipient |
 | Sender-key group sends (`multi_recipient`, group send endorsements; falls back to one copy per member) | deployed; not yet run in a group of 3+ |
@@ -156,7 +156,7 @@ The building blocks are exported too (`signalFetch`, `SignalSocket`, `ProtocolSt
 
 ## Storage
 
-The client owns these tables (`SIGNAL_TABLES`): `kv`, `failed_envelopes`, `prekeys`, `signed_prekeys`, `kyber_prekeys`, `kyber_usage`, `sessions`, `sender_keys`, `key_counters`, `messages`, `groups`, `contacts`, `send_log`, `seen_envelopes`, `chat_timers`, `sender_key_shares`, `counters`, `last_errors`, `identities`. Your app can keep its own tables in the same database. Don't reuse these names, except to add your own keys to `kv`. Table names, column layouts and encryption labels are kept compatible with signal-mcp-worker, so an account linked there keeps working.
+The client owns these tables (`SIGNAL_TABLES`): `kv`, `failed_envelopes`, `prekeys`, `signed_prekeys`, `kyber_prekeys`, `kyber_usage`, `sessions`, `sender_keys`, `key_counters`, `messages`, `groups`, `contacts`, `send_log`, `seen_envelopes`, `chat_timers`, `sender_key_shares`, `counters`, `last_errors`, `identities`. Your app can keep its own tables in the same database. Don't reuse these names, except to add your own keys to `kv`. Table names, column layouts and encryption labels are stable across versions, so an existing database keeps working after an upgrade.
 
 ## Development
 

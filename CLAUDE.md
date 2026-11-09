@@ -1,6 +1,6 @@
 # CLAUDE.md: context for working on signal-edge
 
-A Signal linked-device client library, Workers first, runtime-pluggable. Extracted from FacePlant101/signal-mcp-worker (synced with its main at c4bd3d2, PR #16, on 2026-11-08), which is its main user and the place where things get verified against a real account. See README.md for the layers and API.
+A Signal linked-device client library, Workers first, runtime-pluggable. Extracted from the owner's private Workers app (synced on 2026-11-08), which is its main user and the place where things get verified against a real account. That app is private: don't name it or link to it in this repository (docs, code, commit messages). See README.md for the layers and API.
 
 ## Layout
 - `src/client.ts` `SignalClient`: the account (linking, receive loop, sending, directory, retries, keys). No host APIs: storage is `SqlDatabase` (src/sql.ts); background work, scheduling and new-message notification are options (`waitUntil`, `scheduleMaintenance`, `onMessages`).
@@ -13,14 +13,14 @@ A Signal linked-device client library, Workers first, runtime-pluggable. Extract
 - `examples/worker`: minimal Durable Object app; `npm run check` bundles it with Wrangler (dry run).
 
 ## Rules
-- **Compatibility with existing data:** table names, columns, kv keys and Sealer AAD labels (`account_secrets`, `sender_certificate|aci.device`, `table|identity|key`, …) must stay as they are, or signal-mcp-worker's linked account stops working. Add migrations, don't rename.
+- **Compatibility with existing data:** table names, columns, kv keys and Sealer AAD labels (`account_secrets`, `sender_certificate|aci.device`, `table|identity|key`, …) must stay as they are, or existing deployments' linked accounts stop working. Add migrations, don't rename.
 - Relative imports end in `.js` (module `nodenext`); the build is plain `tsc`.
 - Anything talking to Signal goes through `signalFetch`/`SignalSocket` (pinned TLS), never `fetch()`, except CDN redirects to non-signal.org hosts.
 - Run `npm run typecheck` and `npm test` before committing; after changing `tls/` or `sealed/`, rebuild (`npm run build:tls` / `build:sealed`) and commit `src/vendor/`.
 - No key material, account data or real phone numbers in tests or fixtures. Live tests only with a throwaway number.
 - AGPL-3.0-only (libsignal). Credits live in NOTICE and README "Credits"; after any `Cargo.lock` change, run `python3 scripts/third-party-licenses.py` and commit `THIRD_PARTY_LICENSES.txt` (it ships with the prebuilt WASM).
 
-## Gotchas (from the signal-mcp-worker spike, still true)
+## Gotchas (from the original spike, still true)
 - wasm-bindgen objects may be consumed when passed by value: create a fresh `WasmProtocolAddress` per call.
 - Workers-only APIs (`crypto.subtle.timingSafeEqual`, …) don't belong in the core; use the helpers in `src/util/bytes.ts`. `npm test` runs the core in Node and catches them.
 - signal-wasm 0.6.6 reports every libsignal failure as `SignalError: Operation failed`; test behaviour, not error text. Its `WasmInMemIdentityKeyStore` can't be exported and rejects a changed key it has cached, hence our `identities` table and `ProtocolStore.resetIdentityStore()`.
@@ -29,5 +29,5 @@ A Signal linked-device client library, Workers first, runtime-pluggable. Extract
 - On the deployed edge a single `cloudflare:sockets` write above 64 KiB kills the connection; `net/tls.ts` writes at most 16 KiB through one ordered queue. Local workerd doesn't reproduce this.
 - A server may answer and close before reading a large body; `signalFetch` still reads the response after a failed write.
 - Durable Object outbound WebSockets don't hibernate (they keep the object alive).
-- This sandbox's network proxy blocks raw TCP, so the example's `/link` can't reach Signal from a cloud session; network paths are verified by deploying (signal-mcp-worker).
+- This sandbox's network proxy blocks raw TCP, so the example's `/link` can't reach Signal from a cloud session; network paths are verified by CI's network tests and by deploying the app that uses the library.
 - getrandom 0.2/0.3/0.4 in `sealed/` each need their JS backend feature (see sealed/Cargo.toml and .cargo/config.toml).

@@ -17,7 +17,14 @@ fi
 [ -x "$LLVM/llvm-ar" ] || { echo "llvm-ar not found next to $LLVM/clang (install llvm)" >&2; exit 1; }
 export CC_wasm32_unknown_unknown="$LLVM/clang" AR_wasm32_unknown_unknown="$LLVM/llvm-ar"
 
-(cd sealed && cargo build --release --target wasm32-unknown-unknown)
+# Panic messages carry source paths: map the home directory and this checkout to fixed names, so the
+# binary names neither (and builds on different machines match more closely).
+remap=(--remap-path-prefix="$HOME/.cargo=/cargo" --remap-path-prefix="$PWD=/signal-edge")
+export CFLAGS_wasm32_unknown_unknown="-ffile-prefix-map=$HOME/.cargo=/cargo -ffile-prefix-map=$PWD=/signal-edge"
+encode() { local IFS=$'\x1f'; echo "$*"; }
+# These flags replace the ones in sealed/.cargo/config.toml, so its getrandom cfg is repeated here.
+(cd sealed && CARGO_ENCODED_RUSTFLAGS="$(encode --cfg 'getrandom_backend="wasm_js"' "${remap[@]}")" \
+  cargo build --release --target wasm32-unknown-unknown)
 wasm-bindgen --target web --out-dir src/vendor/signal-sealed \
   sealed/target/wasm32-unknown-unknown/release/signal_sealed.wasm
 ls -l src/vendor/signal-sealed

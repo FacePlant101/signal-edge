@@ -8,6 +8,9 @@ import type { Sealer } from "../util/sealer.js";
 import { toBase64 } from "../util/bytes.js";
 import { signal } from "./wasm.js";
 
+/** Sender keys kept per sending device (one per group it sends to us in, plus rotations). */
+const MAX_SENDER_KEYS_PER_DEVICE = 64;
+
 /** Which of our two identities a store belongs to. */
 export type OurIdentity = "aci" | "pni";
 
@@ -161,6 +164,13 @@ export class ProtocolStore {
 		if (!record) return;
 		const sealed = await this.#seal("sender_keys", `${key}|${distributionId}`, record);
 		this.db.exec("INSERT OR REPLACE INTO sender_keys (address, distribution_id, record, updated_at) VALUES (?, ?, ?, ?)", key, distributionId, sealed, Date.now());
+		// Anyone can send distribution messages with new ids: keep each device's newest ones only.
+		this.db.exec(
+			"DELETE FROM sender_keys WHERE address = ? AND distribution_id NOT IN (SELECT distribution_id FROM sender_keys WHERE address = ? ORDER BY updated_at DESC LIMIT ?)",
+			key,
+			key,
+			MAX_SENDER_KEYS_PER_DEVICE,
+		);
 	}
 
 	async #sessionWrite(name: string, device: number): Promise<() => void> {

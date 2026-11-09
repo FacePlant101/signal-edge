@@ -1,5 +1,9 @@
 import { hostConnect, wasmModule, type RawSocket } from "../runtime.js";
 import { TlsClient, initSync } from "../vendor/signal-tls/signal_tls.js";
+import { withDeadline } from "../util/deadline.js";
+
+/** Deadline for TCP connect plus the TLS handshake. */
+const HANDSHAKE_TIMEOUT_MS = 15_000;
 
 let ready = false;
 function initTls(): void {
@@ -34,6 +38,12 @@ export class TlsSocket {
 					return;
 				}
 				for (;;) {
+					// After the peer's close_notify rustls takes no more input (feeding it more would spin):
+					// the stream ends here, whatever else arrives.
+					if (this.#tls.peer_closed) {
+						controller.close();
+						return;
+					}
 					const { value, done } = await reader.read();
 					if (done || this.#closed) {
 						controller.close();
@@ -55,10 +65,32 @@ export class TlsSocket {
 		});
 	}
 
-	static async connect(hostname: string, port = 443): Promise<TlsSocket> {
+	static async connect(hostname: string, port = 443, timeoutMs = HANDSHAKE_TIMEOUT_MS): Promise<TlsSocket> {
 		initTls();
-		const socket = await hostConnect()(hostname, port);
-		await socket.opened;
+		let raw: RawSocket | undefined;
+		let stopped = false;
+		return withDeadline(
+			async () => {
+				const socket = await hostConnect()(hostname, port);
+				raw = socket;
+				if (stopped) {
+					await socket.close().catch(() => {});
+					throw new Error(`TLS: connect to ${hostname} stopped`);
+				}
+				await socket.opened;
+				return TlsSocket.#handshake(hostname, socket);
+			},
+			timeoutMs,
+			undefined,
+			`TLS: connect to ${hostname}`,
+			() => {
+				stopped = true;
+				void raw?.close().catch(() => {});
+			},
+		);
+	}
+
+	static async #handshake(hostname: string, socket: RawSocket): Promise<TlsSocket> {
 		const tls = new TlsClient(hostname);
 		const writer = socket.writable.getWriter();
 		const reader = socket.readable.getReader();

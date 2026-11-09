@@ -40,6 +40,9 @@ export { sendToServiceId, dataMessage, contentWithData, contentWithSentTranscrip
 export {
 	decodeEnvelope,
 	parseContent,
+	keepGroups,
+	groupsNamed,
+	groupOf,
 	unpad,
 	extractMentions,
 	checkMentions,

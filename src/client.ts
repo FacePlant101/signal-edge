@@ -25,7 +25,7 @@ import { signal } from "./protocol/wasm.js";
 import { createIdentitySchema, IdentityLog } from "./protocol/identities.js";
 import { ChatTimers, createTimerSchema, type Expiry } from "./protocol/timers.js";
 import { createSenderKeySchema, SenderKeyShares, senderKeyUsable, sendWithSenderKey } from "./protocol/sender-keys.js";
-import { ACI_PATTERN, checkMentions, decodeEnvelope, extractMentions, validMentions, type Attachment, type Mention, type MessageRecord } from "./protocol/content.js";
+import { ACI_PATTERN, checkMentions, decodeEnvelope, extractMentions, validMentions, type Attachment, type Mention, type MessageRecord, type ParsedContent, groupsNamed, keepGroups } from "./protocol/content.js";
 import {
 	createRetrySchema,
 	decryptionErrorFor,
@@ -105,13 +105,25 @@ const DEFAULT_MAX_ATTACHMENT_BYTES = 25_000_000;
 
 /** The alarm doubles as a watchdog: it reconnects the chat socket if it dropped. */
 const WATCHDOG_MS = 60_000;
+/** Undecryptable envelopes kept for diagnosis: at most this many, for at most this long. */
+const MAX_FAILED_ENVELOPES = 500;
+const FAILED_ENVELOPE_DAYS = 30;
+/** reset() waits at most this long for protocol work already holding the lock. */
+const RESET_WAIT_MS = 30_000;
 const RECONNECT_MS = 5_000;
 /** Group state older than this is refetched before sending to the group. */
 const GROUP_STALE_MS = 3600 * 1000;
+/** Incoming messages refetch a group's state at most this often (a newer revision: REVISION_REFETCH_MS). */
+const GROUP_MESSAGE_REFETCH_MS = 60_000;
+const GROUP_REVISION_REFETCH_MS = 10_000;
+/** How long a group we couldn't fetch as a member (403) is ignored for. */
+const NOT_OUR_GROUP_MS = 3600 * 1000;
 // Retry requests (src/signal/retry.ts). Desktop's RETRY_LIMIT is 5 per message; the hourly caps are ours.
 const RETRIES_PER_MESSAGE = 5;
 const RETRIES_PER_DEVICE_HOUR = 20;
-const RETRIES_PER_HOUR = 60;
+// The overall cap is generous so one sender can't use it up for everyone; per message and per device
+// limits do the bounding.
+const RETRIES_PER_HOUR = 300;
 const HOUR_MS = 3600 * 1000;
 /** Refetch the sender certificate when it has less than this left. */
 const SENDER_CERTIFICATE_MARGIN_MS = HOUR_MS;
@@ -235,11 +247,20 @@ export class SignalClient {
 	#refreshing?: Promise<KeyRefreshResult>;
 	#chat?: SignalSocket;
 	#connecting?: Promise<void>;
+	/**
+	 * Bumped by reset(). Work started for the account before a reset (a socket, its handler, a sync,
+	 * a key refresh, a link) checks it before writing, so nothing of the forgotten account comes back.
+	 */
+	#generation = 0;
 	/** Serializes everything that touches session state: receiving and sending. */
 	#protocol: Promise<unknown> = Promise.resolve();
 	#receive: ReceiveState = { connected: false, envelopes: 0, stored: 0, ignored: 0, failed: 0, kinds: {} };
 	#syncing?: Promise<DirectorySync>;
 	#groupRefreshes = new Map<string, Promise<GroupRecord>>();
+	/** When incoming messages last made us fetch a group's state, per group id. */
+	#groupFetchedAt = new Map<string, number>();
+	/** Groups whose state the server refused us (not a member), per id: until when to ignore them. */
+	#notOurGroups = new Map<string, number>();
 	#timers?: ChatTimers;
 	#retryLimits = new Limiter();
 	/** Access keys (base64) the server refused, per ACI: sends to them stay authenticated until the key changes. */
@@ -257,7 +278,11 @@ export class SignalClient {
 		this.#db = opts.db;
 		this.#createSchema();
 		const meta = this.#get("account_meta");
-		if (meta) this.#link = JSON.parse(dec.decode(meta));
+		if (meta) {
+			this.#link = JSON.parse(dec.decode(meta));
+			// Earlier versions kept the phone number here, unsealed: rewrite without it.
+			if (this.#link.state === "linked" && this.#link.number !== undefined) this.#setLink(this.#link);
+		}
 		// A (re)started instance has no socket: let the watchdog connect right away.
 		if (this.#link.state === "linked") this.#schedule(Date.now() + 1000);
 	}
@@ -295,6 +320,7 @@ export class SignalClient {
 		await this.#socket?.close().catch(() => {});
 
 		const keys = newProvisioningKeyPair();
+		const generation = this.#generation;
 		let gotAddress!: (address: string) => void;
 		const address = new Promise<string>((resolve) => (gotAddress = resolve));
 
@@ -307,7 +333,7 @@ export class SignalClient {
 				if (req.verb === "PUT" && req.path === "/v1/message" && req.body) {
 					const body = req.body;
 					// Ack first, then link outside the socket callback.
-					const linking = this.#finishLink(body, keys.privateKey);
+					const linking = this.#finishLink(body, keys.privateKey, generation);
 					this.#opts.waitUntil?.(linking);
 					return 200;
 				}
@@ -338,10 +364,14 @@ export class SignalClient {
 	 * listed on the phone until removed there. Cancel the host's scheduled maintain() yourself.
 	 */
 	async reset(): Promise<LinkState> {
+		this.#generation++;
 		await this.#socket?.close().catch(() => {});
 		const chat = this.#chat;
 		this.#chat = undefined;
 		await chat?.close().catch(() => {});
+		// Let protocol work already holding the lock finish (it is bounded by request timeouts); work
+		// queued behind it sees the new generation and stops.
+		await Promise.race([this.#protocol, new Promise((r) => setTimeout(r, RESET_WAIT_MS))]);
 		this.#db.transaction(() => {
 			for (const t of SIGNAL_TABLES) this.#db.exec(`DELETE FROM ${t}`);
 		});
@@ -349,6 +379,8 @@ export class SignalClient {
 		this.#timers = undefined;
 		this.#stores = undefined;
 		this.#refusedAccessKeys.clear();
+		this.#groupFetchedAt.clear();
+		this.#notOurGroups.clear();
 		this.#senderCertificate = undefined;
 		this.#senderCertificateFetch = undefined; // a fetch still in flight is for the forgotten account
 		this.#senderCertificateRetryAt = 0;
@@ -424,6 +456,7 @@ export class SignalClient {
 	#connectChat(): Promise<void> {
 		if (this.#chat && !this.#chat.closed) return Promise.resolve();
 		this.#connecting ??= (async () => {
+			const generation = this.#generation;
 			const a = await this.#loadSecrets();
 			const stores = await this.#loadStores();
 			const messages = await this.messageStore();
@@ -436,8 +469,9 @@ export class SignalClient {
 				const chat = await SignalSocket.connect(
 					"/v1/websocket/",
 					{
-						onRequest: (req) => this.#onChatRequest(req, self, stores, pairs, messages, identities),
+						onRequest: (req) => this.#onChatRequest(req, self, stores, pairs, messages, identities, generation),
 						onClose: (code, reason) => {
+							if (generation !== this.#generation) return; // a socket of the forgotten account
 							if (this.#chat === chat) this.#chat = undefined;
 							this.#receive.connected = false;
 							this.#receive.lastClose = `${new Date().toISOString()} ${code} ${reason}`;
@@ -446,6 +480,10 @@ export class SignalClient {
 					},
 					{ Authorization: deviceAuth(a), "X-Signal-Receive-Stories": "false" },
 				);
+				if (generation !== this.#generation) {
+					await chat.close().catch(() => {});
+					return;
+				}
 				this.#chat = chat;
 				this.#receive.connected = true;
 				this.#receive.connectedAt = Date.now();
@@ -467,7 +505,10 @@ export class SignalClient {
 		pairs: Partial<Record<OurIdentity, Uint8Array>>,
 		messages: MessageStore,
 		identities: IdentityLog,
+		generation: number,
 	): Promise<number> {
+		// A socket of an account forgotten since (reset): not ours to process; it is being closed.
+		if (generation !== this.#generation) return 503;
 		if (req.verb === "PUT" && req.path === "/api/v1/queue/empty") {
 			this.#receive.queueEmptyAt = Date.now();
 			return 200;
@@ -491,6 +532,7 @@ export class SignalClient {
 			// Checked and recorded under the protocol lock: after a reconnect the server can redeliver an
 			// envelope while the old socket's handler is still processing the first copy.
 			const r = await this.#withProtocolLock(async () => {
+				this.#stillCurrent(generation);
 				if (seen.has(guid)) return undefined;
 				try {
 					const r = await receiveEnvelope(body, self, stores, pairs, identities);
@@ -513,14 +555,21 @@ export class SignalClient {
 				this.#count(`ignored:${r.reason}`);
 			} else {
 				for (const k of r.parsed.kinds) this.#count(k);
+				// Outside the protocol lock (may fetch group state): Signal's apps drop group messages from
+				// non-members, and so do we, before anything is stored or reported.
+				await this.#dropNonMembers(r.parsed, r.sender, self);
+				this.#stillCurrent(generation);
+				await this.#checkQuotes(r.parsed.records, messages);
 				if (r.identityChanged) {
 					this.#count("identity-change");
 					await messages.add([identityChangeRecord(r.sender, r.senderDevice)], r.serverGuid, Date.now());
 				}
-				const added = await messages.add(r.parsed.records, r.serverGuid, Date.now());
+				const inserted: MessageRecord[] = [];
+				const added = await messages.add(r.parsed.records, r.serverGuid, Date.now(), inserted);
 				// Stored first (the envelope already counts as seen, so a restart mid-download mustn't lose
-				// it), then a long message's full text replaces the short body.
-				await this.#expandLongText(r.parsed.records, messages);
+				// it), then a long message's full text replaces the short body: only for records stored just
+				// now, or a later message reusing a timestamp could rewrite an earlier one.
+				await this.#expandLongText(inserted, messages);
 				this.#receive.stored += added;
 				this.#counters().bump("receive:stored", added);
 				if (r.parsed.decryptionError) {
@@ -534,6 +583,7 @@ export class SignalClient {
 				for (const t of r.parsed.timers) if (this.#chatTimers().apply(t)) this.#count("timer:updated");
 			}
 		} catch (e) {
+			if (generation !== this.#generation) return 503; // forgotten meanwhile: store nothing
 			// Ack anyway, or Signal redelivers it forever; keep it sealed so it can be reprocessed after a fix,
 			// and ask the sender for it again when we know who sent it.
 			if (e instanceof DecryptFailure) {
@@ -1076,14 +1126,17 @@ export class SignalClient {
 	}
 
 	async #syncDirectory(): Promise<DirectorySync> {
+		const generation = this.#generation;
 		const a = await this.#loadSecrets();
 		const dir = await this.directory();
 		const snapshot = await readStorage(deviceAuth(a), this.#accountMasterKey(a));
+		this.#stillCurrent(generation);
 		await dir.replaceContacts(snapshot.contacts);
 		const known = new Map((await dir.groups()).map((g) => [g.id, g]));
 		for (const sg of snapshot.groups) {
 			const id = groupIdFromMasterKey(sg.masterKey);
 			const g: GroupRecord = { ...(known.get(id) ?? { id, masterKey: toBase64(sg.masterKey) }), source: "storage", blocked: sg.blocked, archived: sg.archived };
+			this.#stillCurrent(generation);
 			await dir.putGroup(g);
 			known.set(id, g);
 		}
@@ -1148,7 +1201,7 @@ export class SignalClient {
 		return out;
 	}
 
-	// --- attachments (src/signal/attachments.ts) ---
+	// --- attachments (src/protocol/attachments.ts) ---
 
 	/**
 	 * A message longer than about 2 KB arrives with only its start as the body and the whole text as a
@@ -1160,17 +1213,11 @@ export class SignalClient {
 		const long = records.filter((rec) => rec.attachments?.some((a) => a.contentType === LONG_TEXT_TYPE));
 		if (!long.length) return;
 		const copies = long.map((rec) => structuredClone(rec));
-		const r = await expandLongText(copies, MAX_LONG_TEXT_BYTES, async (a) => {
-			let timer: ReturnType<typeof setTimeout> | undefined;
-			try {
-				return await Promise.race([
-					downloadAttachment(a.pointer!, a.size),
-					new Promise<never>((_, reject) => (timer = setTimeout(() => reject(new Error("timed out")), LONG_TEXT_TIMEOUT_MS))),
-				]);
-			} finally {
-				if (timer !== undefined) clearTimeout(timer);
-			}
-		});
+		// The sender chooses the pointer: the download is capped at the long-text limit and cancelled
+		// (connection closed) when the timeout passes, so it can't keep running or grow unseen.
+		const r = await expandLongText(copies, MAX_LONG_TEXT_BYTES, (a) =>
+			downloadAttachment(a.pointer!, a.size, { maxBytes: MAX_LONG_TEXT_BYTES, signal: AbortSignal.timeout(LONG_TEXT_TIMEOUT_MS) }),
+		);
 		for (const rec of copies) if (!rec.attachments?.some((a) => a.contentType === LONG_TEXT_TYPE)) await messages.replace(rec);
 		this.#count("receive:long text expanded", r.expanded);
 		this.#count("receive:long text not expanded", r.failed);
@@ -1183,7 +1230,7 @@ export class SignalClient {
 		if (!a) throw new Error(`no attachment ${messageId}/${index}`);
 		if (!a.pointer) throw new Error("this attachment was received before the Worker kept download keys, or has none");
 		if (a.size !== undefined && a.size > maxBytes) throw new Error(`attachment is ${a.size} bytes; the limit is ${maxBytes}`);
-		return { contentType: a.contentType, fileName: a.fileName, voiceNote: a.voiceNote, data: await downloadAttachment(a.pointer, a.size) };
+		return { contentType: a.contentType, fileName: a.fileName, voiceNote: a.voiceNote, data: await downloadAttachment(a.pointer, a.size, { maxBytes }) };
 	}
 
 	get #maxAttachmentBytes(): number {
@@ -1200,6 +1247,25 @@ export class SignalClient {
 		}
 	}
 
+	/**
+	 * Quotes carry the quoted text as the sender writes it. Where the quoted message is stored (same
+	 * chat, id and author), its stored text replaces the sender's version; otherwise the quote is
+	 * marked unverified, so nobody can put words in another person's mouth unnoticed.
+	 */
+	async #checkQuotes(records: MessageRecord[], messages: MessageStore): Promise<void> {
+		for (const rec of records) {
+			const q = rec.quote;
+			if (!q) continue;
+			const stored = q.id !== undefined ? await messages.findSent(rec.conversation, q.id) : undefined;
+			if (stored && stored.author === q.author) {
+				q.text = stored.body !== undefined ? truncateUtf8(stored.body, MAX_TEXT_BYTES) : undefined;
+				q.verified = true;
+			} else {
+				q.verified = false;
+			}
+		}
+	}
+
 	/** ACI → display name, from storage-service contacts. */
 	async names(): Promise<Record<string, string>> {
 		return Object.fromEntries(await this.#names(await this.directory()));
@@ -1209,23 +1275,84 @@ export class SignalClient {
 		return new Map((await dir.contacts()).filter((c) => c.name).map((c) => [c.aci, c.name!]));
 	}
 
-	/** Records a group seen in a message; fetches its state when it is new or at a newer revision. */
+	/** Records a group seen in a message; fetches its state when it is new or at a newer revision (throttled). */
 	async #noteGroup(masterKey: Uint8Array, revision: number): Promise<void> {
-		const dir = await this.directory();
-		const id = groupIdFromMasterKey(masterKey);
-		let g = await dir.group(id);
-		if (!g) {
-			g = { id, masterKey: toBase64(masterKey), source: "message" };
-			await dir.putGroup(g);
-		}
-		if (g.revision === undefined || g.revision < revision) await this.#refreshGroup(g);
+		await this.#groupForMessage(groupIdFromMasterKey(masterKey), masterKey, revision);
 	}
+
+	/**
+	 * A group named by an incoming message: the stored state, fetched first when the group is unknown
+	 * or the message claims a newer revision (or `refresh`), at most once per GROUP_MESSAGE_REFETCH_MS
+	 * per group (GROUP_REVISION_REFETCH_MS for a newer revision). An unknown group is stored only once
+	 * the server hands us its state as a member, so made-up master keys leave nothing behind.
+	 * "not a member": the server refused us. undefined: unknown and not fetchable right now.
+	 */
+	async #groupForMessage(id: string, masterKey: Uint8Array | undefined, revision?: number, refresh = false): Promise<GroupRecord | "not a member" | undefined> {
+		const now = Date.now();
+		if ((this.#notOurGroups.get(id) ?? 0) > now) return "not a member";
+		const dir = await this.directory();
+		const known = await dir.group(id);
+		const newer = revision !== undefined && (known?.revision === undefined || known.revision < revision);
+		if (known && !newer && !refresh) return known;
+		const last = this.#groupFetchedAt.get(id) ?? 0;
+		if (now - last < (newer ? GROUP_REVISION_REFETCH_MS : GROUP_MESSAGE_REFETCH_MS)) return known;
+		this.#groupFetchedAt.set(id, now);
+		if (known) {
+			const next = await this.#refreshGroup(known).catch((e) => {
+				console.error("group refresh failed", e);
+				return known;
+			});
+			return next;
+		}
+		if (!masterKey) return undefined;
+		try {
+			const generation = this.#generation;
+			const state = await fetchGroupState(masterKey, await this.#groupCredential());
+			this.#stillCurrent(generation);
+			const g: GroupRecord = { id, masterKey: toBase64(masterKey), source: "message", ...state };
+			await dir.putGroup(g);
+			return g;
+		} catch (e) {
+			if (e instanceof GroupFetchError) {
+				this.#notOurGroups.set(id, now + NOT_OUR_GROUP_MS);
+				return "not a member";
+			}
+			console.error("group fetch failed", e);
+			return undefined;
+		}
+	}
+
+	/**
+	 * Drops group records, timers and group contexts whose sender isn't a member of that group, as
+	 * Signal's apps do: knowing a group's master key (a former member, an invite link) doesn't make
+	 * someone a member. Our own devices' messages (sync transcripts) are kept. A group whose state
+	 * can't be fetched right now (network) keeps its messages rather than losing real ones.
+	 */
+	async #dropNonMembers(parsed: ParsedContent, sender: string, self: Self): Promise<void> {
+		if (sender === self.aci) return;
+		const ids = groupsNamed(parsed);
+		if (!ids.size) return;
+		const contexts = new Map(parsed.groups.map((g) => [groupIdFromMasterKey(g.masterKey), g] as const));
+		const isMember = (g: GroupRecord | "not a member" | undefined) => typeof g === "object" && !!g.members?.some((m) => m.aci === sender);
+		const allowed = new Set<string>();
+		for (const id of ids) {
+			const ctx = contexts.get(id);
+			let g = await this.#groupForMessage(id, ctx?.masterKey, ctx?.revision);
+			// Not in the stored list: they may have just joined. Refetch once (throttled) before deciding.
+			if (typeof g === "object" && !isMember(g)) g = await this.#groupForMessage(id, ctx?.masterKey, undefined, true);
+			if (isMember(g) || g === undefined) allowed.add(id);
+			else this.#count("ignored:group message from a non-member");
+		}
+		keepGroups(parsed, allowed);
+	}
+
 
 	/** Fetches one group's state from the groups server and stores it (one fetch per group at a time). */
 	#refreshGroup(g: GroupRecord): Promise<GroupRecord> {
 		let p = this.#groupRefreshes.get(g.id);
 		if (!p) {
 			p = (async () => {
+				const generation = this.#generation;
 				const dir = await this.directory();
 				let state: Partial<GroupRecord>;
 				try {
@@ -1234,6 +1361,7 @@ export class SignalClient {
 					if (!(e instanceof GroupFetchError)) throw e;
 					state = { fetchError: e.message, fetchedAt: Date.now() };
 				}
+				this.#stillCurrent(generation);
 				// Storage flags may have changed while we were fetching.
 				const next: GroupRecord = { ...((await dir.group(g.id)) ?? g), ...state };
 				await dir.putGroup(next);
@@ -1272,9 +1400,20 @@ export class SignalClient {
 	}
 
 	#withProtocolLock<T>(fn: () => Promise<T>): Promise<T> {
-		const run = this.#protocol.then(fn, fn);
+		// Work queued before a reset doesn't run for the account it was meant for.
+		const generation = this.#generation;
+		const guarded = () => {
+			this.#stillCurrent(generation);
+			return fn();
+		};
+		const run = this.#protocol.then(guarded, guarded);
 		this.#protocol = run.catch(() => {});
 		return run;
+	}
+
+	/** Throws when reset() ran since `generation` was read: the work belongs to a forgotten account. */
+	#stillCurrent(generation: number): void {
+		if (generation !== this.#generation) throw new Error("the account was forgotten (reset) meanwhile");
 	}
 
 	#count(kind: string, n = 1): void {
@@ -1312,6 +1451,9 @@ export class SignalClient {
 		try {
 			if (!this.#receive.authFailed) await this.#connectChat().catch((e) => console.error("chat connect failed", e));
 			pruneRetryState(this.#db);
+			// Undecryptable envelopes are kept for diagnosis, not forever: anyone can send them.
+			this.#db.exec("DELETE FROM failed_envelopes WHERE received_at < ?", Date.now() - FAILED_ENVELOPE_DAYS * 24 * 3600 * 1000);
+			this.#db.exec("DELETE FROM failed_envelopes WHERE id NOT IN (SELECT id FROM failed_envelopes ORDER BY id DESC LIMIT ?)", MAX_FAILED_ENVELOPES);
 			if (Date.now() >= (this.#getNumber("next_key_refresh") ?? 0)) {
 				await this.refreshKeys().catch((e) => {
 					console.error("key refresh failed", e);
@@ -1331,11 +1473,13 @@ export class SignalClient {
 	}
 
 	async #refreshKeys(force: boolean): Promise<KeyRefreshResult> {
+		const generation = this.#generation;
 		const a = await this.#loadSecrets();
 		const stores = await this.#loadStores();
 		const result: KeyRefreshResult = {};
 		for (const [ours, s] of Object.entries(stores) as [OurIdentity, ProtocolStore][]) {
 			const server = await this.#keyCounts(a, ours);
+			this.#stillCurrent(generation);
 			const upload: KeyUpload = {};
 			if (force || server.count < PRE_KEY_MINIMUM || server.count > PRE_KEY_MAX_COUNT) upload.preKeys = await s.generatePreKeys(PRE_KEY_BATCH);
 			if (force || server.pqCount < PRE_KEY_MINIMUM || server.pqCount > PRE_KEY_MAX_COUNT) upload.pqPreKeys = await s.generateKyberPreKeys(PRE_KEY_BATCH);
@@ -1412,12 +1556,16 @@ export class SignalClient {
 		return { status: res.status, body: tryJson(res.body) };
 	}
 
-	async #finishLink(envelope: Uint8Array, provisioningPrivateKey: Uint8Array): Promise<void> {
+	async #finishLink(envelope: Uint8Array, provisioningPrivateKey: Uint8Array, generation: number): Promise<void> {
+		if (generation !== this.#generation) return;
 		this.#setLink({ state: "linking" }, false);
 		try {
 			const msg = await decryptProvisionEnvelope(envelope, provisioningPrivateKey);
 			await this.#socket?.close().catch(() => {});
 			const secrets = await this.#register(msg);
+			// Reset while the server was linking us: the device exists on the phone's list, but this
+			// instance was told to forget everything, so it keeps nothing.
+			this.#stillCurrent(generation);
 			await this.#saveSecrets(secrets);
 			this.#stores = undefined;
 			this.#setLink({ state: "linked", aci: secrets.aci, pni: secrets.pni, number: secrets.number, deviceId: secrets.deviceId, linkedAt: secrets.linkedAt });
@@ -1516,8 +1664,13 @@ export class SignalClient {
 
 	#setLink(link: LinkState, persist = true): void {
 		this.#link = link;
-		// Transient states live in memory only; a restarted DO shows the last durable state.
-		if (persist && (link.state === "linked" || link.state === "error")) this.#put("account_meta", enc.encode(JSON.stringify(link)));
+		// Transient states live in memory only; a restarted DO shows the last durable state. This row is
+		// read before the storage key is (synchronously, in the constructor), so it isn't sealed and holds
+		// no phone number: that stays in the sealed account secrets.
+		if (persist && (link.state === "linked" || link.state === "error")) {
+			const stored = link.state === "linked" ? { ...link, number: undefined } : link;
+			this.#put("account_meta", enc.encode(JSON.stringify(stored)));
+		}
 	}
 
 	#sealer(): Promise<Sealer> {

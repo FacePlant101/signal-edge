@@ -71,6 +71,11 @@ export async function receiveEnvelope(
 	if (type === CIPHERTEXT.WHISPER || type === CIPHERTEXT.PREKEY) {
 		// A new session carries the sender's identity key: check it against our record first.
 		const identityKey = type === CIPHERTEXT.PREKEY ? preKeyMessageIdentity(ciphertext) : undefined;
+		// Our own other devices share our ACI identity key; anything else claiming to be us (only the
+		// server could send it) is refused, since our own account's messages may carry sync transcripts.
+		if (identityKey && sender === self.aci && !sameBytes(identityKey, ourIdentityKey(identityPairs.aci))) {
+			throw new Error("a PreKey message from our own account carries a different identity key");
+		}
 		const check = identityKey && (await identities.check(sender, identityKey));
 		if (check === "changed") store.resetIdentityStore(); // else libsignal rejects the new key until restart
 		const wasmType = type === CIPHERTEXT.PREKEY ? sig.message_type_pre_key() : sig.message_type_signal();
@@ -103,4 +108,14 @@ export async function receiveEnvelope(
 		await aci.saveSenderKey(sender, device, distributionId(parsed.senderKeyDistribution, false));
 	}
 	return { status: "decrypted", sender, senderDevice: device, parsed, serverGuid: env.serverGuid, identityChanged };
+}
+
+/** The public half (33 bytes) of a serialized identity key pair; empty when there is none. */
+function ourIdentityKey(pair: Uint8Array | undefined): Uint8Array {
+	if (!pair) return new Uint8Array(0);
+	return signal().WasmIdentityKeyPair.deserialize(pair).public_key.serialize();
+}
+
+function sameBytes(a: Uint8Array, b: Uint8Array): boolean {
+	return a.length === b.length && a.every((x, i) => x === b[i]);
 }

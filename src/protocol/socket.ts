@@ -4,6 +4,8 @@ import { decodeWsMessage, encodeWsRequest, encodeWsResponse, type WsRequest, typ
 export const CHAT_HOST = "chat.signal.org";
 const KEEPALIVE_MS = 30_000;
 const REQUEST_TIMEOUT_MS = 30_000;
+/** Consecutive unanswered keepalives after which the connection counts as dead and is closed. */
+const KEEPALIVE_FAILURES = 2;
 
 export type SignalSocketHandlers = {
 	/** Server-initiated request; return the HTTP status to acknowledge with. */
@@ -34,8 +36,16 @@ export class SignalSocket {
 				handlers.onClose(code, reason);
 			},
 		});
+		// A half-open connection never errors by itself: close it when keepalives go unanswered, so the
+		// owner sees onClose and reconnects.
+		let failures = 0;
 		s.#keepalive = setInterval(() => {
-			s.request("GET", "/v1/keepalive").catch(() => {});
+			s.request("GET", "/v1/keepalive").then(
+				() => (failures = 0),
+				() => {
+					if (++failures >= KEEPALIVE_FAILURES) void s.close().catch(() => {});
+				},
+			);
 		}, KEEPALIVE_MS);
 		return s;
 	}

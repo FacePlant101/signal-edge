@@ -90,7 +90,12 @@ export type MessageRecord = {
 	sentAt: number; // DataMessage timestamp, the id other messages refer to
 	body?: string;
 	attachments?: Attachment[];
-	quote?: { id?: number; author?: string; text?: string; mentions?: Mention[] };
+	/**
+	 * A quoted message, as the sender describes it. `verified`: the quoted id and author match a stored
+	 * message in the same chat, and `text` is that message's text; false: no such stored message, so
+	 * `text` is only the sender's word.
+	 */
+	quote?: { id?: number; author?: string; text?: string; mentions?: Mention[]; verified?: boolean };
 	/** @mentions: each replaces a placeholder (U+FFFC) in the body; indices in UTF-16 code units. */
 	mentions?: Mention[];
 	reaction?: { emoji?: string; remove: boolean; targetAuthor?: string; targetSentAt?: number };
@@ -201,16 +206,19 @@ export type GroupContext = { masterKey: Uint8Array; revision: number };
 
 /**
  * Turns a decrypted Content into message records. `sender` is the decrypted sender's ACI;
- * sync "sent" transcripts from our own devices become outgoing records.
+ * sync "sent" transcripts from our own devices become outgoing records. A record belongs to a group
+ * only through the group context inside the message (its master key), as in Signal's apps; the
+ * sealed-sender layer's group id is chosen by the sender alone and isn't used for routing. Whether
+ * the sender is a member is the caller's check (SignalClient does it before storing).
  */
-export function parseContent(plaintext: Uint8Array, sender: string, senderDevice: number, ourAci: string, sealedGroupId?: Uint8Array): ParsedContent {
+export function parseContent(plaintext: Uint8Array, sender: string, senderDevice: number, ourAci: string, _sealedGroupId?: Uint8Array): ParsedContent {
 	const c = new Decoded(plaintext);
 	const out: ParsedContent = { records: [], senderKeyDistribution: c.bytes(7), decryptionError: c.bytes(8), kinds: [], groups: [], timers: [] };
 
 	const data = c.bytes(1);
 	if (data) {
 		out.kinds.push("data");
-		const rec = dataMessage(data, sender, senderDevice, false, `aci:${sender}`, sealedGroupId, out.groups, out.timers);
+		const rec = dataMessage(data, sender, senderDevice, false, `aci:${sender}`, out.groups, out.timers);
 		if (rec) out.records.push(rec);
 		// Field numbers only (no content), so "data arrived but nothing stored" can be told apart.
 		else out.kinds.push(`data-empty:${[...new Decoded(data).fields.keys()].sort((a, b) => a - b).join(",")}`);
@@ -228,12 +236,12 @@ export function parseContent(plaintext: Uint8Array, sender: string, senderDevice
 			const destConv = dest ? (dest.startsWith("PNI:") ? `pni:${dest.slice(4)}` : dest.startsWith("+") ? `e164:${dest}` : `aci:${dest}`) : "unknown";
 			const msg = t.bytes(3);
 			if (msg) {
-				const rec = dataMessage(msg, sender, senderDevice, true, destConv, undefined, out.groups, out.timers);
+				const rec = dataMessage(msg, sender, senderDevice, true, destConv, out.groups, out.timers);
 				if (rec) out.records.push(rec);
 			}
 			const edit = t.bytes(10);
 			if (edit) {
-				const rec = editMessage(edit, sender, senderDevice, true, destConv, undefined, out.groups);
+				const rec = editMessage(edit, sender, senderDevice, true, destConv, out.groups);
 				if (rec) out.records.push(rec);
 			}
 		} else {
@@ -244,7 +252,7 @@ export function parseContent(plaintext: Uint8Array, sender: string, senderDevice
 	const edit = c.bytes(11);
 	if (edit) {
 		out.kinds.push("edit");
-		const rec = editMessage(edit, sender, senderDevice, false, `aci:${sender}`, sealedGroupId, out.groups);
+		const rec = editMessage(edit, sender, senderDevice, false, `aci:${sender}`, out.groups);
 		if (rec) out.records.push(rec);
 	}
 
@@ -254,11 +262,32 @@ export function parseContent(plaintext: Uint8Array, sender: string, senderDevice
 	return out;
 }
 
-function editMessage(buf: Uint8Array, author: string, device: number, outgoing: boolean, conversation: string, sealedGroupId?: Uint8Array, groups?: GroupContext[]): MessageRecord | undefined {
+/** The group id of a `group:<id>` conversation, else undefined. */
+export function groupOf(conversation: string): string | undefined {
+	return conversation.startsWith("group:") ? conversation.slice(6) : undefined;
+}
+
+/** The groups a parsed Content names (by records and timers). */
+export function groupsNamed(parsed: ParsedContent): Set<string> {
+	return new Set([...parsed.records.map((r) => groupOf(r.conversation)), ...parsed.timers.map((t) => groupOf(t.conversation))].filter((x): x is string => !!x));
+}
+
+/** Drops records, timers and group contexts of groups not in `allowed`; everything outside groups stays. */
+export function keepGroups(parsed: ParsedContent, allowed: Set<string>): void {
+	const keep = (conversation: string) => {
+		const id = groupOf(conversation);
+		return !id || allowed.has(id);
+	};
+	parsed.records = parsed.records.filter((r) => keep(r.conversation));
+	parsed.timers = parsed.timers.filter((t) => keep(t.conversation));
+	parsed.groups = parsed.groups.filter((g) => allowed.has(toBase64(groupIdFromMasterKey(g.masterKey))));
+}
+
+function editMessage(buf: Uint8Array, author: string, device: number, outgoing: boolean, conversation: string, groups?: GroupContext[]): MessageRecord | undefined {
 	const e = new Decoded(buf);
 	const data = e.bytes(2);
 	if (!data) return undefined;
-	const rec = dataMessage(data, author, device, outgoing, conversation, sealedGroupId, groups);
+	const rec = dataMessage(data, author, device, outgoing, conversation, groups);
 	if (!rec) return undefined;
 	return { ...rec, kind: "edit", targetSentAt: e.uint(1) };
 }
@@ -269,7 +298,6 @@ function dataMessage(
 	device: number,
 	outgoing: boolean,
 	conversation: string,
-	sealedGroupId?: Uint8Array,
 	groups?: GroupContext[],
 	timers?: TimerSeen[],
 ): MessageRecord | undefined {
@@ -277,7 +305,7 @@ function dataMessage(
 	const groupContext = d.bytes(15) && new Decoded(d.bytes(15)!);
 	const masterKey = groupContext?.bytes(1);
 	if (masterKey?.length === 32) groups?.push({ masterKey, revision: groupContext!.uint(2) ?? 0 });
-	const groupId = masterKey?.length === 32 ? groupIdFromMasterKey(masterKey) : sealedGroupId;
+	const groupId = masterKey?.length === 32 ? groupIdFromMasterKey(masterKey) : undefined;
 	const rec: MessageRecord = {
 		kind: "message",
 		conversation: groupId ? `group:${toBase64(groupId)}` : conversation,

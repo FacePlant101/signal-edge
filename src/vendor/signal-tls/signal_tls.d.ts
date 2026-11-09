@@ -19,6 +19,7 @@ export class TlsClient {
     /**
      * Feeds bytes read from the socket. Returns any application plaintext they decrypted to.
      * On error, still call `outgoing()` and send it: it may hold a TLS alert for the peer.
+     * Bytes after the peer's close_notify are ignored: the connection is over.
      */
     receive(data: Uint8Array | number[]): Uint8Array;
     /**

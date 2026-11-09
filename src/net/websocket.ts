@@ -2,6 +2,7 @@ import { userAgent } from "../runtime.js";
 import { ByteQueue, concat, enc, randomBytes, toBase64 } from "../util/bytes.js";
 import { formatRequestHead, readResponseHead } from "./http.js";
 import { TlsSocket } from "./tls.js";
+import { withDeadline } from "../util/deadline.js";
 
 const OP_CONT = 0x0;
 const OP_TEXT = 0x1;
@@ -11,6 +12,8 @@ const OP_PING = 0x9;
 const OP_PONG = 0xa;
 
 const MAX_MESSAGE = 16 * 1024 * 1024;
+/** Deadline for connecting, the TLS handshake and the HTTP upgrade together. */
+const CONNECT_TIMEOUT_MS = 30_000;
 
 export type WsHandlers = {
 	onMessage: (data: Uint8Array) => void | Promise<void>;
@@ -27,7 +30,29 @@ export class WsClient {
 	}
 
 	static async connect(host: string, path: string, headers: Record<string, string>, handlers: WsHandlers): Promise<WsClient> {
-		const sock = await TlsSocket.connect(host);
+		let sock: TlsSocket | undefined;
+		let stopped = false;
+		return withDeadline(
+			async () => {
+				const s = await TlsSocket.connect(host);
+				sock = s;
+				if (stopped) {
+					await s.close();
+					throw new Error(`WebSocket: connect to ${host} stopped`);
+				}
+				return WsClient.#upgrade(s, host, path, headers, handlers);
+			},
+			CONNECT_TIMEOUT_MS,
+			undefined,
+			`WebSocket: connect to ${host}${path}`,
+			() => {
+				stopped = true;
+				void sock?.close();
+			},
+		);
+	}
+
+	static async #upgrade(sock: TlsSocket, host: string, path: string, headers: Record<string, string>, handlers: WsHandlers): Promise<WsClient> {
 		const key = toBase64(randomBytes(16));
 		try {
 			await sock.write(
@@ -86,6 +111,7 @@ export class WsClient {
 		let code = 1006;
 		let reason = "connection lost";
 		let fragments: Uint8Array[] = [];
+		let fragmentBytes = 0;
 		try {
 			for (;;) {
 				const [b0, b1] = await q.take(2);
@@ -114,10 +140,13 @@ export class WsClient {
 					if (!this.#closed) await this.#frame(OP_CLOSE, payload.subarray(0, 2)).catch(() => {});
 					break;
 				} else if (opcode === OP_BINARY || opcode === OP_TEXT || opcode === OP_CONT) {
+					fragmentBytes += payload.length;
+					if (fragmentBytes > MAX_MESSAGE) throw new Error("WebSocket: message too large");
 					fragments.push(payload);
 					if (fin) {
 						const message = fragments.length === 1 ? fragments[0]! : concat(...fragments);
 						fragments = [];
+						fragmentBytes = 0;
 						await handlers.onMessage(message);
 					}
 				} else {

@@ -69,9 +69,15 @@ export class SignalAccount extends DurableObject<Env> {
 	}
 }
 
+/** Constant-time comparison (of SHA-256 digests, so lengths don't leak either). */
+async function tokenMatches(given: string | null, expected: string): Promise<boolean> {
+	const digest = async (s: string) => new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(s)));
+	return crypto.subtle.timingSafeEqual(await digest(given ?? ""), await digest(expected));
+}
+
 export default {
 	async fetch(req: Request, env: Env): Promise<Response> {
-		if (!env.ADMIN_TOKEN || env.ADMIN_TOKEN.length < 32 || req.headers.get("Authorization") !== `Bearer ${env.ADMIN_TOKEN}`) {
+		if (!env.ADMIN_TOKEN || env.ADMIN_TOKEN.length < 32 || !(await tokenMatches(req.headers.get("Authorization"), `Bearer ${env.ADMIN_TOKEN}`))) {
 			return new Response("unauthorized", { status: 401 });
 		}
 		const account = env.ACCOUNT.getByName("primary");

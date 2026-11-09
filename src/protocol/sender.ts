@@ -272,6 +272,8 @@ export async function sendToServiceId(ctx: SendContext, serviceId: string, conte
 	if (!devices.length) {
 		await processKeys("*");
 		devices = (await store.sessionDevices(serviceId)).filter((d) => !(isSelf && d === ctx.ourDeviceId));
+		// Our own account with no other device (a standalone primary without linked devices): nobody to send to.
+		if (isSelf && !devices.length) return [];
 	}
 
 	for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {

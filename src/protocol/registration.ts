@@ -99,12 +99,12 @@ async function sessionCall(what: string, method: string, path: string, json?: un
 }
 
 /** POST /v1/verification/session for an E.164 number. The server asks for a captcha first. */
-export function createVerificationSession(number: string): Promise<VerificationSession> {
+export async function createVerificationSession(number: string): Promise<VerificationSession> {
 	if (!/^\+[1-9]\d{6,14}$/.test(number)) throw new Error("the number must be in E.164 form, e.g. +4712345678");
 	return sessionCall("creating a verification session", "POST", SESSION_PATH, { number });
 }
 
-export function getVerificationSession(id: string): Promise<VerificationSession> {
+export async function getVerificationSession(id: string): Promise<VerificationSession> {
 	return sessionCall("reading the verification session", "GET", sessionPath(id));
 }
 
@@ -112,20 +112,20 @@ export function getVerificationSession(id: string): Promise<VerificationSession>
  * The token from signalcaptchas.org (registration/generate.html): the text after "signalcaptcha://",
  * which is how the page hands it over; the prefix is stripped if pasted along.
  */
-export function submitCaptcha(id: string, captcha: string): Promise<VerificationSession> {
+export async function submitCaptcha(id: string, captcha: string): Promise<VerificationSession> {
 	const token = captcha.trim().replace(/^signalcaptcha:\/\//, "");
 	if (!token) throw new Error("empty captcha token");
 	return sessionCall("submitting the captcha", "PATCH", sessionPath(id), { captcha: token });
 }
 
 /** Asks the server to send a code by SMS or voice call. `languages` (Accept-Language) picks the message's language. */
-export function requestVerificationCode(id: string, transport: VerificationTransport, languages: string[] = []): Promise<VerificationSession> {
+export async function requestVerificationCode(id: string, transport: VerificationTransport, languages: string[] = []): Promise<VerificationSession> {
 	const headers = languages.length ? { "Accept-Language": languages.join(",") } : undefined;
 	// "desktop" as Desktop's standalone registration; the server uses it to pick the message template.
 	return sessionCall("requesting a verification code", "POST", sessionPath(id, "/code"), { transport, client: "desktop" }, headers);
 }
 
-export function submitVerificationCode(id: string, code: string): Promise<VerificationSession> {
+export async function submitVerificationCode(id: string, code: string): Promise<VerificationSession> {
 	const digits = code.replace(/[\s-]/g, "");
 	if (!/^\d{4,8}$/.test(digits)) throw new Error("the code is the digits from the SMS or call");
 	return sessionCall("submitting the verification code", "PUT", sessionPath(id, "/code"), { code: digits });
@@ -166,33 +166,38 @@ const REGISTER_MESSAGES: Record<number, string> = {
 	429: "too many attempts; wait and try again",
 };
 
+/** The JSON body of POST /v1/registration, as libsignal's register_account_request test has it. */
+export function registrationBody(r: RegisterAccountRequest): Record<string, unknown> {
+	return {
+		sessionId: r.sessionId,
+		accountAttributes: {
+			// No push service: messages are fetched over the authenticated socket.
+			fetchesMessages: true,
+			registrationId: r.registrationId,
+			pniRegistrationId: r.pniRegistrationId,
+			capabilities: r.capabilities,
+			// A JSON array of bytes, not base64 (libsignal's AccountAttributes).
+			unidentifiedAccessKey: [...r.unidentifiedAccessKey],
+			unrestrictedUnidentifiedAccess: false,
+			discoverableByPhoneNumber: r.discoverableByPhoneNumber,
+			recoveryPassword: toBase64(r.recoveryPassword),
+			registrationLock: null,
+		},
+		skipDeviceTransfer: true,
+		aciIdentityKey: r.aciIdentityKey,
+		pniIdentityKey: r.pniIdentityKey,
+		aciSignedPreKey: r.aciSignedPreKey,
+		pniSignedPreKey: r.pniSignedPreKey,
+		aciPqLastResortPreKey: r.aciPqLastResortPreKey,
+		pniPqLastResortPreKey: r.pniPqLastResortPreKey,
+	};
+}
+
 /** POST /v1/registration with a verified session: creates (or takes over) the account for `number` as device 1. */
 export async function registerAccount(r: RegisterAccountRequest): Promise<RegisterAccountResponse> {
 	const res = await signalFetch(CHAT_HOST, "POST", "/v1/registration", {
 		headers: { Authorization: `Basic ${btoa(`${r.number}:${r.password}`)}` },
-		json: {
-			sessionId: r.sessionId,
-			accountAttributes: {
-				// No push service: messages are fetched over the authenticated socket.
-				fetchesMessages: true,
-				registrationId: r.registrationId,
-				pniRegistrationId: r.pniRegistrationId,
-				capabilities: r.capabilities,
-				// A JSON array of bytes, not base64 (libsignal's AccountAttributes).
-				unidentifiedAccessKey: [...r.unidentifiedAccessKey],
-				unrestrictedUnidentifiedAccess: false,
-				discoverableByPhoneNumber: r.discoverableByPhoneNumber,
-				recoveryPassword: toBase64(r.recoveryPassword),
-				registrationLock: null,
-			},
-			skipDeviceTransfer: true,
-			aciIdentityKey: r.aciIdentityKey,
-			pniIdentityKey: r.pniIdentityKey,
-			aciSignedPreKey: r.aciSignedPreKey,
-			pniSignedPreKey: r.pniSignedPreKey,
-			aciPqLastResortPreKey: r.aciPqLastResortPreKey,
-			pniPqLastResortPreKey: r.pniPqLastResortPreKey,
-		},
+		json: registrationBody(r),
 	});
 	if (res.status !== 200) {
 		const retry = Number(res.headers.get("retry-after"));
@@ -203,8 +208,14 @@ export async function registerAccount(r: RegisterAccountRequest): Promise<Regist
 			Number.isFinite(retry) && retry > 0 ? retry : undefined,
 		);
 	}
-	const body = JSON.parse(dec.decode(res.body)) as { uuid: string; pni?: string; number?: string; storageCapable?: boolean; reregistration?: boolean };
-	if (typeof body.uuid !== "string") throw new Error("POST /v1/registration: no account id in the response");
+	let body: { uuid?: unknown; pni?: string; number?: string; storageCapable?: boolean; reregistration?: boolean };
+	try {
+		body = JSON.parse(dec.decode(res.body));
+	} catch {
+		body = {};
+	}
+	// The server created the account, but without its id the credentials can't be used: say so plainly.
+	if (typeof body.uuid !== "string") throw new Error("POST /v1/registration succeeded but its response couldn't be read (no account id); register again with a new code");
 	return { aci: body.uuid.toLowerCase(), pni: body.pni?.toLowerCase(), number: body.number, storageCapable: !!body.storageCapable, reregistration: !!body.reregistration };
 }
 

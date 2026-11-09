@@ -74,6 +74,7 @@ export {
 	requestVerificationCode,
 	submitVerificationCode,
 	registerAccount,
+	registrationBody,
 	generateAccountEntropyPool,
 	registrationRecoveryPassword,
 	RegistrationError,

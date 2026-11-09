@@ -122,8 +122,6 @@ type KeyUpload = { preKeys?: UploadPreKey[]; pqPreKeys?: UploadSignedPreKey[]; s
 export type KeyRefreshResult = Partial<Record<OurIdentity, { server: KeyCounts; uploaded: string[]; removedOldKeys: number }>>;
 
 const DEFAULT_DEVICE_NAME = "signal-edge";
-/** How long a primary account's "do we have linked devices" answer is trusted. */
-const LINKED_DEVICES_CHECK_MS = 10 * 60 * 1000;
 const ADDRESS_TIMEOUT_MS = 15_000;
 
 // Signal-Desktop AccountManager.preload.ts: batch size, refill thresholds, rotation age.
@@ -346,8 +344,8 @@ export class SignalClient {
 	#senderCertificateRetryAt = 0;
 	/** A registration in progress (in memory: a restart starts over, as the server's session expires anyway). */
 	#registration?: Registration;
-	/** Whether this primary account has linked devices, and when that was checked. */
-	#linkedDevices?: { any: boolean; at: number };
+	/** A verifyCode() in progress: a second call (e.g. a double click) waits for it instead of registering again. */
+	#verifying?: Promise<LinkState>;
 
 	/** Creates the tables if needed and reads the link state. Synchronous; no network. */
 	constructor(opts: SignalClientOptions) {
@@ -482,9 +480,16 @@ export class SignalClient {
 	 * have the number can find the account (default false). No PIN is set (SVR needs SGX attestation,
 	 * which this library doesn't do), so the number can only be registered again with a new code.
 	 */
-	async verifyCode(code: string, opts: { discoverableByPhoneNumber?: boolean } = {}): Promise<LinkState> {
+	verifyCode(code: string, opts: { discoverableByPhoneNumber?: boolean } = {}): Promise<LinkState> {
+		// Two account creations at once would race two passwords and key sets; the second call shares the first.
+		this.#verifying ??= this.#verifyCode(code, opts).finally(() => (this.#verifying = undefined));
+		return this.#verifying;
+	}
+
+	async #verifyCode(code: string, opts: { discoverableByPhoneNumber?: boolean }): Promise<LinkState> {
 		const r = this.#currentRegistration();
-		r.session = await this.#registrationStep(r, () => submitVerificationCode(r.session.id, code));
+		// Already verified (account creation failed after the code was accepted): go straight to creating it.
+		if (!r.session.verified) r.session = await this.#registrationStep(r, () => submitVerificationCode(r.session.id, code));
 		if (!r.session.verified) throw new Error("the code wasn't accepted");
 		const secrets = await this.#createPrimaryAccount(r.number, r.session.id, opts.discoverableByPhoneNumber ?? false);
 		const sealed = await this.#sealSecrets(secrets);
@@ -493,7 +498,6 @@ export class SignalClient {
 		this.#put("account_secrets", sealed);
 		this.#registration = undefined;
 		this.#stores = undefined;
-		this.#linkedDevices = { any: false, at: Date.now() };
 		this.#setLink({ state: "linked", aci: secrets.aci, pni: secrets.pni, number: secrets.number, deviceId: secrets.deviceId, linkedAt: secrets.linkedAt, primary: true });
 		// The watchdog uploads one-time prekeys (none are on the server yet) and opens the chat socket.
 		this.#schedule(Date.now());
@@ -581,28 +585,6 @@ export class SignalClient {
 	}
 
 	/**
-	 * Whether our own account has other devices to send sync transcripts to. A linked device always
-	 * has the primary; a primary has them only if it linked some (GET /v1/devices, checked at most
-	 * every 10 minutes; assumed yes when the check fails, so nothing is lost).
-	 */
-	async #hasOtherDevices(a: AccountSecrets): Promise<boolean> {
-		if (!a.primary) return true;
-		const known = this.#linkedDevices;
-		if (known && Date.now() - known.at < LINKED_DEVICES_CHECK_MS) return known.any;
-		try {
-			const res = await signalFetch(CHAT_HOST, "GET", "/v1/devices", { headers: { Authorization: deviceAuth(a) } });
-			if (res.status !== 200) throw new Error(`HTTP ${res.status}`);
-			const devices = (JSON.parse(dec.decode(res.body)) as { devices?: { id: number }[] }).devices ?? [];
-			const any = devices.some((d) => d.id !== a.deviceId);
-			this.#linkedDevices = { any, at: Date.now() };
-			return any;
-		} catch (e) {
-			console.warn("GET /v1/devices failed; sending sync transcripts anyway", e);
-			return true;
-		}
-	}
-
-	/**
 	 * Forgets the linked account locally: closes the sockets and empties SIGNAL_TABLES. The device stays
 	 * listed on the phone until removed there. Cancel the host's scheduled maintain() yourself.
 	 */
@@ -643,7 +625,7 @@ export class SignalClient {
 		this.#senderCertificateFetch = undefined; // a fetch still in flight is for the forgotten account
 		this.#senderCertificateRetryAt = 0;
 		this.#registration = undefined;
-		this.#linkedDevices = undefined;
+		this.#verifying = undefined;
 		this.#receive = { connected: false, envelopes: 0, stored: 0, ignored: 0, failed: 0, kinds: {} };
 		this.#link = { state: "unlinked" };
 		return this.#link;
@@ -990,13 +972,13 @@ export class SignalClient {
 		const a = await this.#loadSecrets();
 		const stores = await this.#loadStores();
 		const identities = await this.#identities();
-		if (!(await this.#hasOtherDevices(a))) throw new Error("this account has no other devices to show a Note to Self on");
 		await this.#withProtocolLock(generation, async () => {
 			const timestamp = Date.now();
 			const ctx = this.#sendContext(a, stores, identities);
 			// Note to Self's own timer, or the phone would read the code as turning it off.
 			const expiry = this.#chatTimers().forSend(`aci:${a.aci}`);
-			await sendToServiceId(ctx, a.aci, contentWithSentTranscript(a.aci, timestamp, dataMessage(body, timestamp, undefined, undefined, [], expiry), []), timestamp);
+			const reached = await sendToServiceId(ctx, a.aci, contentWithSentTranscript(a.aci, timestamp, dataMessage(body, timestamp, undefined, undefined, [], expiry), []), timestamp);
+			if (!reached.length) throw new Error("this account has no other devices to show a Note to Self on");
 		});
 	}
 
@@ -1053,8 +1035,6 @@ export class SignalClient {
 		const key = isSelf ? undefined : await this.#accessKey(target);
 		const sealedSender = key && (await this.#sealedSender(a));
 		const sendLog = await this.#sendLog();
-		// A primary account without linked devices has nobody to send the transcript to (Note to Self is then kept here only).
-		const sync = await this.#hasOtherDevices(a);
 		return this.#withProtocolLock(generation, async () => {
 			const timestamp = Date.now();
 			const ctx = this.#sendContext(a, stores, identities, sendLog, sealedSender);
@@ -1071,15 +1051,12 @@ export class SignalClient {
 				result.sealedSender = !!ctx.sealedTo?.includes(target);
 				this.#count(result.sealedSender ? "send:sealed" : "send:authenticated");
 			}
-			if (!sync) {
-				result.syncedDevices = [];
-			} else {
-				try {
-					result.syncedDevices = await sendToServiceId(ctx, a.aci, contentWithSentTranscript(target, timestamp, data, isSelf ? [] : [target], ctx.sealedTo), timestamp);
-				} catch (e) {
-					if (isSelf) throw e;
-					result.syncError = String(e); // delivered, but our phone won't show it
-				}
+			// A primary account without linked devices reaches nobody here ([]): Note to Self is then kept here only.
+			try {
+				result.syncedDevices = await sendToServiceId(ctx, a.aci, contentWithSentTranscript(target, timestamp, data, isSelf ? [] : [target], ctx.sealedTo), timestamp);
+			} catch (e) {
+				if (isSelf) throw e;
+				result.syncError = String(e); // delivered, but our phone won't show it
 			}
 			if (out.stored.length) result.attachments = out.stored.length;
 			if (out.longText) result.longText = true;
@@ -1222,7 +1199,6 @@ export class SignalClient {
 		const groupIdBytes = fromBase64(group.id);
 		const sendLog = await this.#sendLog();
 		const shares = this.#senderKeyShares();
-		const sync = await this.#hasOtherDevices(a);
 		return this.#withProtocolLock(generation, async () => {
 			const timestamp = Date.now();
 			const ctx = this.#sendContext(a, stores, identities, sendLog, sealedSender);
@@ -1284,14 +1260,10 @@ export class SignalClient {
 				senderKey,
 				failed,
 			};
-			if (!sync) {
-				result.syncedDevices = [];
-			} else {
-				try {
-					result.syncedDevices = await sendToServiceId(ctx, a.aci, contentWithSentTranscript(undefined, timestamp, data, delivered, ctx.sealedTo), timestamp);
-				} catch (e) {
-					result.syncError = String(e);
-				}
+			try {
+				result.syncedDevices = await sendToServiceId(ctx, a.aci, contentWithSentTranscript(undefined, timestamp, data, delivered, ctx.sealedTo), timestamp);
+			} catch (e) {
+				result.syncError = String(e);
 			}
 			await messages.add([outgoingRecord(`group:${group.id}`, a, timestamp, out, expiry)], `local-${timestamp}`, timestamp);
 			result.safetyNumberChanged = await this.#recordIdentityChanges(ctx, messages);

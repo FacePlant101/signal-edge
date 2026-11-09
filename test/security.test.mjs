@@ -270,3 +270,57 @@ test("registration checks its input and its order before any network call", asyn
 	await assert.rejects(client.verifyCode("123456"), /no registration in progress/);
 	assert.equal(client.status().state, "unlinked");
 });
+
+test("the registration body has the shape libsignal sends", async () => {
+	const { registrationBody } = await import("../dist/index.js");
+	const key = (id) => ({ keyId: id, publicKey: "cHVi", signature: "c2ln" });
+	const body = registrationBody({
+		number: "+18005550101",
+		sessionId: "abc",
+		password: "pw",
+		registrationId: 123,
+		pniRegistrationId: 456,
+		aciIdentityKey: "YWNp",
+		pniIdentityKey: "cG5p",
+		aciSignedPreKey: key(1),
+		pniSignedPreKey: key(2),
+		aciPqLastResortPreKey: key(3),
+		pniPqLastResortPreKey: key(4),
+		unidentifiedAccessKey: new Uint8Array([117, 110, 105, 100]),
+		recoveryPassword: new TextEncoder().encode("recovery"),
+		capabilities: { spqr: true },
+		discoverableByPhoneNumber: false,
+	});
+	// From libsignal rust/net/chat/src/ws/registration/request.rs register_account_request (fetching messages, no push token).
+	assert.deepEqual(body, {
+		sessionId: "abc",
+		accountAttributes: {
+			fetchesMessages: true,
+			registrationId: 123,
+			pniRegistrationId: 456,
+			capabilities: { spqr: true },
+			unidentifiedAccessKey: [117, 110, 105, 100],
+			unrestrictedUnidentifiedAccess: false,
+			discoverableByPhoneNumber: false,
+			recoveryPassword: "cmVjb3Zlcnk=",
+			registrationLock: null,
+		},
+		skipDeviceTransfer: true,
+		aciIdentityKey: "YWNp",
+		pniIdentityKey: "cG5p",
+		aciSignedPreKey: key(1),
+		pniSignedPreKey: key(2),
+		aciPqLastResortPreKey: key(3),
+		pniPqLastResortPreKey: key(4),
+	});
+	assert.equal("pushToken" in body, false);
+});
+
+test("registration calls reject (not throw) on bad input", async () => {
+	const { createVerificationSession, submitVerificationCode, submitCaptcha } = await import("../dist/index.js");
+	for (const call of [() => createVerificationSession("123"), () => submitVerificationCode("s", "abc"), () => submitCaptcha("s", " ")]) {
+		let p;
+		assert.doesNotThrow(() => (p = call()));
+		await assert.rejects(p);
+	}
+});

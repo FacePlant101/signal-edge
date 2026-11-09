@@ -146,7 +146,7 @@ The WASM files are `@getmaapp/signal-wasm/signal_wasm_bg.wasm`, `signal-edge/was
 | `maintain()` | watchdog: (re)connects the receive socket, prunes retry state, refreshes prekeys and contacts when due; returns when to run next |
 | `startReceiving()`, `stopReceiving()`, `receiveStatus()` | the receive socket and its counters |
 | `sendText(to, body, files?, extras?)` | `to` = `"self"`, `aci:<uuid>` or `group:<id>`; `files` = forwarded attachments (`{ref}`), text or base64; `extras` = `replyTo` / `reaction` by a stored message's sentAt; `@[aci:<uuid>]` in group text is a mention. Returns devices reached, sealed-sender and sender-key use, sync result, safety-number changes |
-| `notifySelf(body)` | Note to Self that isn't stored or logged (for one-time codes) |
+| `notifySelf(body)`, `notifyContact(aci, body)` | a message that isn't stored, logged or synced (for one-time codes): to Note to Self, or to a contact, e.g. the owner of a standalone account |
 | `messages(limit, chat?)`, `conversations()`, `chats()` | stored history; chats include known groups and contact names |
 | `syncDirectory()`, `contacts()`, `groups()`, `group(id, refresh?)`, `names()` | contacts and groups (no keys in the output) |
 | `attachment(messageId, index, maxBytes?)` | downloads and decrypts an attachment of a stored message |

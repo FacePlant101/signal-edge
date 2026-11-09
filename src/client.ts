@@ -1000,6 +1000,30 @@ export class SignalClient {
 		});
 	}
 
+	/**
+	 * A 1:1 message to `to` (an ACI) that isn't stored, logged or synced to our other devices: for
+	 * one-time codes sent to someone else, e.g. the owner of a standalone account (which has no
+	 * other devices to show a Note to Self on). Carries our profile key and the chat's timer.
+	 */
+	async notifyContact(to: string, body: string): Promise<void> {
+		const target = to.replace(/^aci:/, "").toLowerCase();
+		if (!ACI_PATTERN.test(target)) throw new Error("recipient must be an ACI (UUID)");
+		const generation = this.#generation;
+		const a = await this.#loadSecrets();
+		if (target === a.aci) return this.notifySelf(body);
+		const stores = await this.#loadStores();
+		const identities = await this.#identities();
+		const key = await this.#accessKey(target);
+		const sealedSender = key && (await this.#sealedSender(a));
+		await this.#withProtocolLock(generation, async () => {
+			const timestamp = Date.now();
+			const ctx = this.#sendContext(a, stores, identities, undefined, sealedSender);
+			const expiry = this.#chatTimers().forSend(`aci:${target}`);
+			const data = dataMessage(body, timestamp, fromBase64(a.profileKey), undefined, [], expiry);
+			await sendToServiceId(ctx, target, contentWithData(data), timestamp, { accessKey: key, contentHint: CONTENT_HINT.RESENDABLE });
+		});
+	}
+
 	// --- sending ---
 
 	/**

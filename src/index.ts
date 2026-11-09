@@ -67,6 +67,22 @@ export { Directory, createDirectorySchema, groupIdFromMasterKey, fetchGroupState
 export { readStorage, STORAGE_HOST, type StorageSnapshot, type StorageContact, type StorageGroup } from "./protocol/storage-service.js";
 export { downloadAttachment, decryptAttachment, uploadAttachment, attachmentPointer, LONG_TEXT_TYPE, type AttachmentPointer } from "./protocol/attachments.js";
 export { accessKey, unseal, libsignalExtra, CONTENT_HINT } from "./protocol/sealed.js";
+export {
+	createVerificationSession,
+	getVerificationSession,
+	submitCaptcha,
+	requestVerificationCode,
+	submitVerificationCode,
+	registerAccount,
+	registrationBody,
+	generateAccountEntropyPool,
+	registrationRecoveryPassword,
+	RegistrationError,
+	type VerificationSession,
+	type VerificationTransport,
+	type RegisterAccountRequest,
+	type RegisterAccountResponse,
+} from "./protocol/registration.js";
 export { signal } from "./protocol/wasm.js";
 export { encode as encodeProto, Decoded as ProtoDecoded, decodeProvisioningAddress } from "./protocol/proto.js";
 export { enc, dec, concat, fromBase64, toBase64, randomBytes, timingSafeEqual } from "./util/bytes.js";

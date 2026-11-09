@@ -242,3 +242,85 @@ test("a refused rate limit names the limit that refused and uses up none of them
 	assert.equal(l.refusal([{ key: "other", max: 2, windowMs: 60_000 }, limits[1]], 4), "all");
 	assert.equal(l.allow(limits, 60_001), true); // the window moved on
 });
+
+// --- Standalone registration (no network) ---
+
+test("account entropy pools are 64 characters from [0-9a-z]", async () => {
+	const { generateAccountEntropyPool } = await import("../dist/index.js");
+	const seen = new Set();
+	for (let i = 0; i < 50; i++) {
+		const aep = generateAccountEntropyPool();
+		assert.match(aep, /^[0-9a-z]{64}$/);
+		for (const c of aep) seen.add(c);
+	}
+	assert.equal(seen.size, 36, "every character turns up");
+});
+
+test("the registration recovery password matches libsignal's known answer", async () => {
+	const { registrationRecoveryPassword } = await import("../dist/index.js");
+	const out = await registrationRecoveryPassword(new Uint8Array(32).fill(0x2a));
+	assert.equal(Buffer.from(out).toString("hex"), "91f959cfee39676dedd028bc8bbbd1e91ffa6a42c57754d095fe8abe7f0d4f56");
+});
+
+test("registration checks its input and its order before any network call", async () => {
+	const client = new SignalClient({ db: memoryDb(), storageKey: TEST_STORAGE_KEY });
+	await assert.rejects(client.startRegistration("12345678"), /E\.164/);
+	await assert.rejects(client.submitCaptcha("signalcaptcha://x"), /no registration in progress/);
+	await assert.rejects(client.requestCode("sms"), /no registration in progress/);
+	await assert.rejects(client.verifyCode("123456"), /no registration in progress/);
+	assert.equal(client.status().state, "unlinked");
+});
+
+test("the registration body has the shape libsignal sends", async () => {
+	const { registrationBody } = await import("../dist/index.js");
+	const key = (id) => ({ keyId: id, publicKey: "cHVi", signature: "c2ln" });
+	const body = registrationBody({
+		number: "+18005550101",
+		sessionId: "abc",
+		password: "pw",
+		registrationId: 123,
+		pniRegistrationId: 456,
+		aciIdentityKey: "YWNp",
+		pniIdentityKey: "cG5p",
+		aciSignedPreKey: key(1),
+		pniSignedPreKey: key(2),
+		aciPqLastResortPreKey: key(3),
+		pniPqLastResortPreKey: key(4),
+		unidentifiedAccessKey: new Uint8Array([117, 110, 105, 100]),
+		recoveryPassword: new TextEncoder().encode("recovery"),
+		capabilities: { spqr: true },
+		discoverableByPhoneNumber: false,
+	});
+	// From libsignal rust/net/chat/src/ws/registration/request.rs register_account_request (fetching messages, no push token).
+	assert.deepEqual(body, {
+		sessionId: "abc",
+		accountAttributes: {
+			fetchesMessages: true,
+			registrationId: 123,
+			pniRegistrationId: 456,
+			capabilities: { spqr: true },
+			unidentifiedAccessKey: [117, 110, 105, 100],
+			unrestrictedUnidentifiedAccess: false,
+			discoverableByPhoneNumber: false,
+			recoveryPassword: "cmVjb3Zlcnk=",
+			registrationLock: null,
+		},
+		skipDeviceTransfer: true,
+		aciIdentityKey: "YWNp",
+		pniIdentityKey: "cG5p",
+		aciSignedPreKey: key(1),
+		pniSignedPreKey: key(2),
+		aciPqLastResortPreKey: key(3),
+		pniPqLastResortPreKey: key(4),
+	});
+	assert.equal("pushToken" in body, false);
+});
+
+test("registration calls reject (not throw) on bad input", async () => {
+	const { createVerificationSession, submitVerificationCode, submitCaptcha } = await import("../dist/index.js");
+	for (const call of [() => createVerificationSession("123"), () => submitVerificationCode("s", "abc"), () => submitCaptcha("s", " ")]) {
+		let p;
+		assert.doesNotThrow(() => (p = call()));
+		await assert.rejects(p);
+	}
+});

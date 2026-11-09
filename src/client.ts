@@ -46,11 +46,35 @@ import { Counters, createCounterSchema, type LastError, type LastingCounter } fr
 import { blob, type SqlDatabase, type SqlValue } from "./sql.js";
 import { dec, enc, fromBase64, randomBytes, toBase64 } from "./util/bytes.js";
 import { Sealer } from "./util/sealer.js";
+import {
+	createVerificationSession,
+	generateAccountEntropyPool,
+	registerAccount,
+	registrationRecoveryPassword,
+	requestVerificationCode,
+	submitCaptcha as submitCaptchaToSession,
+	submitVerificationCode,
+	type VerificationSession,
+	type VerificationTransport,
+} from "./protocol/registration.js";
 
 export type LinkState =
 	| { state: "unlinked" }
 	| { state: "waiting_for_scan"; url: string; since: number }
 	| { state: "linking" }
+	/**
+	 * Registering a new primary account (no phone app). `step`: "captcha" (solve one at
+	 * signalcaptchas.org/registration/generate.html and pass its token), "request_code" (by SMS or
+	 * voice), "enter_code". Times say when the server allows the next SMS, call or code attempt.
+	 */
+	| {
+			state: "registering";
+			number: string;
+			step: "captcha" | "request_code" | "enter_code";
+			nextSmsAt?: number;
+			nextCallAt?: number;
+			nextVerificationAttemptAt?: number;
+	  }
 	| {
 			state: "linked";
 			aci: string;
@@ -59,6 +83,8 @@ export type LinkState =
 			number?: string;
 			deviceId: number;
 			linkedAt: number;
+			/** Registered as this account's primary device (standalone, no phone app) rather than linked. */
+			primary?: boolean;
 	  }
 	| { state: "error"; message: string; at: number };
 
@@ -84,8 +110,12 @@ type AccountSecrets = {
 	signedPreKeys?: { aci: PreKeyRecord; pni?: PreKeyRecord };
 	kyberLastResortPreKeys?: { aci: PreKeyRecord; pni?: PreKeyRecord };
 	linkedAt: number;
+	/** The account's primary device (registered here with a phone number), not a linked one. */
+	primary?: boolean;
 };
 type PreKeyRecord = { id: number; record: string };
+/** A registration in progress: the verification session for `number`, for the account generation it began in. */
+type Registration = { number: string; session: VerificationSession; codeRequested: boolean; generation: number };
 
 type KeyCounts = { count: number; pqCount: number };
 type KeyUpload = { preKeys?: UploadPreKey[]; pqPreKeys?: UploadSignedPreKey[]; signedPreKey?: UploadSignedPreKey; pqLastResortPreKey?: UploadSignedPreKey };
@@ -312,6 +342,10 @@ export class SignalClient {
 	#senderCertificate?: { owner: string; certificate: Uint8Array; expiresAt: number };
 	/** After a failed sender-certificate fetch, sends stay authenticated until then. */
 	#senderCertificateRetryAt = 0;
+	/** A registration in progress (in memory: a restart starts over, as the server's session expires anyway). */
+	#registration?: Registration;
+	/** A verifyCode() in progress: a second call (e.g. a double click) waits for it instead of registering again. */
+	#verifying?: Promise<LinkState>;
 
 	/** Creates the tables if needed and reads the link state. Synchronous; no network. */
 	constructor(opts: SignalClientOptions) {
@@ -349,7 +383,7 @@ export class SignalClient {
 	}
 
 	status(): LinkState {
-		return this.#link;
+		return this.#registration?.generation === this.#generation ? this.#registrationState() : this.#link;
 	}
 
 	/** Our ACI, PNI and device id; undefined until linked. */
@@ -363,6 +397,7 @@ export class SignalClient {
 		if (this.#link.state === "linked") return this.#link;
 		if (this.#link.state === "waiting_for_scan" && this.#socket && !this.#socket.closed) return this.#link;
 		await this.#sealer(); // fail before showing a QR if the secret is missing
+		this.#registration = undefined; // linking instead of registering
 		await this.#socket?.close().catch(() => {});
 
 		const keys = newProvisioningKeyPair();
@@ -405,6 +440,150 @@ export class SignalClient {
 		return this.#link;
 	}
 
+	// --- standalone registration (a new primary account, no phone app) ---
+
+	/**
+	 * Starts registering `number` (E.164) as a new primary account, as Signal-Desktop's standalone
+	 * registration does: a verification session that first wants a captcha. Taking over a number
+	 * registers it here and signs out the phone that had it. Then submitCaptcha(), requestCode(),
+	 * verifyCode().
+	 */
+	async startRegistration(number: string): Promise<LinkState> {
+		if (this.#link.state === "linked") throw new Error("already linked or registered; reset() first");
+		await this.#sealer(); // fail before any server call if the storage key is missing
+		await this.#socket?.close().catch(() => {}); // a QR code shown for linking no longer applies
+		const generation = this.#generation;
+		const session = await createVerificationSession(number);
+		this.#stillCurrent(generation);
+		this.#registration = { number, session, codeRequested: false, generation };
+		return this.#registrationState();
+	}
+
+	/** The captcha token (from signalcaptchas.org/registration/generate.html; "signalcaptcha://" is stripped). */
+	async submitCaptcha(token: string): Promise<LinkState> {
+		const r = this.#currentRegistration();
+		r.session = await this.#registrationStep(r, () => submitCaptchaToSession(r.session.id, token));
+		return this.#registrationState();
+	}
+
+	/** Asks for the code by SMS or voice call; `languages` (e.g. ["nb", "en"]) picks the message's language. */
+	async requestCode(transport: VerificationTransport = "sms", languages: string[] = []): Promise<LinkState> {
+		const r = this.#currentRegistration();
+		r.session = await this.#registrationStep(r, () => requestVerificationCode(r.session.id, transport, languages));
+		r.codeRequested = true;
+		return this.#registrationState();
+	}
+
+	/**
+	 * Submits the code and creates the account: new identity keys, registration ids, profile key and
+	 * account entropy pool, this device as device 1. `discoverableByPhoneNumber`: whether people who
+	 * have the number can find the account (default false). No PIN is set (SVR needs SGX attestation,
+	 * which this library doesn't do), so the number can only be registered again with a new code.
+	 */
+	verifyCode(code: string, opts: { discoverableByPhoneNumber?: boolean } = {}): Promise<LinkState> {
+		// Two account creations at once would race two passwords and key sets; the second call shares the first.
+		this.#verifying ??= this.#verifyCode(code, opts).finally(() => (this.#verifying = undefined));
+		return this.#verifying;
+	}
+
+	async #verifyCode(code: string, opts: { discoverableByPhoneNumber?: boolean }): Promise<LinkState> {
+		const r = this.#currentRegistration();
+		// Already verified (account creation failed after the code was accepted): go straight to creating it.
+		if (!r.session.verified) r.session = await this.#registrationStep(r, () => submitVerificationCode(r.session.id, code));
+		if (!r.session.verified) throw new Error("the code wasn't accepted");
+		const secrets = await this.#createPrimaryAccount(r.number, r.session.id, opts.discoverableByPhoneNumber ?? false);
+		const sealed = await this.#sealSecrets(secrets);
+		// Forgotten (reset) while the server created the account: it exists, but this instance keeps nothing.
+		this.#stillCurrent(r.generation);
+		this.#put("account_secrets", sealed);
+		this.#registration = undefined;
+		this.#stores = undefined;
+		this.#setLink({ state: "linked", aci: secrets.aci, pni: secrets.pni, number: secrets.number, deviceId: secrets.deviceId, linkedAt: secrets.linkedAt, primary: true });
+		// The watchdog uploads one-time prekeys (none are on the server yet) and opens the chat socket.
+		this.#schedule(Date.now());
+		return this.#link;
+	}
+
+	#currentRegistration(): Registration {
+		const r = this.#registration;
+		if (!r || r.generation !== this.#generation) throw new Error("no registration in progress; startRegistration() first");
+		return r;
+	}
+
+	/** Runs one session call; a refusal that carries the session state still updates it (e.g. new wait times). */
+	async #registrationStep(r: Registration, call: () => Promise<VerificationSession>): Promise<VerificationSession> {
+		try {
+			const session = await call();
+			this.#stillCurrent(r.generation);
+			return session;
+		} catch (e) {
+			const session = (e as { session?: VerificationSession }).session;
+			if (session && r.generation === this.#generation) r.session = session;
+			throw e;
+		}
+	}
+
+	#registrationState(): LinkState {
+		const r = this.#registration;
+		if (!r) return this.#link;
+		const s = r.session;
+		const step = s.requestedInformation.includes("captcha") && !s.allowedToRequestCode ? "captcha" : r.codeRequested ? "enter_code" : "request_code";
+		return { state: "registering", number: r.number, step, nextSmsAt: s.nextSmsAt, nextCallAt: s.nextCallAt, nextVerificationAttemptAt: s.nextVerificationAttemptAt };
+	}
+
+	/** Signal-Desktop AccountManager.registerAsPrimaryDevice + #doCreateAccount (primary, with a number). */
+	async #createPrimaryAccount(number: string, sessionId: string, discoverableByPhoneNumber: boolean): Promise<AccountSecrets> {
+		const sig = signal();
+		const newPair = () => identityPair(sig.WasmPrivateKey.generate().serialize());
+		const aciPair = newPair();
+		const pniPair = newPair();
+		const publicKey = (pair: Uint8Array) => toBase64(sig.WasmIdentityKeyPair.deserialize(pair).public_key.serialize());
+		const aciKeys = await lastResortKeys(aciPair);
+		const pniKeys = await lastResortKeys(pniPair);
+		// 16 random bytes, base64 without the "==" padding, as Desktop does.
+		const password = toBase64(randomBytes(16)).slice(0, -2);
+		const registrationId = sig.generateRegistrationId();
+		const pniRegistrationId = sig.generateRegistrationId();
+		const profileKey = randomBytes(32);
+		const accountEntropyPool = generateAccountEntropyPool();
+		const masterKey = libsignalExtra().master_key_from_entropy_pool(accountEntropyPool);
+		const res = await registerAccount({
+			number,
+			sessionId,
+			password,
+			registrationId,
+			pniRegistrationId,
+			aciIdentityKey: publicKey(aciPair),
+			pniIdentityKey: publicKey(pniPair),
+			aciSignedPreKey: aciKeys.signed.upload,
+			pniSignedPreKey: pniKeys.signed.upload,
+			aciPqLastResortPreKey: aciKeys.kyber.upload,
+			pniPqLastResortPreKey: pniKeys.kyber.upload,
+			unidentifiedAccessKey: accessKey(profileKey),
+			recoveryPassword: await registrationRecoveryPassword(masterKey),
+			capabilities: CAPABILITIES,
+			discoverableByPhoneNumber,
+		});
+		return {
+			aci: res.aci,
+			pni: res.pni,
+			number: res.number ?? number,
+			deviceId: 1,
+			password,
+			registrationId,
+			pniRegistrationId,
+			aciIdentityKeyPair: toBase64(aciPair),
+			pniIdentityKeyPair: toBase64(pniPair),
+			profileKey: toBase64(profileKey),
+			accountEntropyPool,
+			readReceipts: false,
+			signedPreKeys: { aci: aciKeys.signed.stored, pni: pniKeys.signed.stored },
+			kyberLastResortPreKeys: { aci: aciKeys.kyber.stored, pni: pniKeys.kyber.stored },
+			linkedAt: Date.now(),
+			primary: true,
+		};
+	}
+
 	/**
 	 * Forgets the linked account locally: closes the sockets and empties SIGNAL_TABLES. The device stays
 	 * listed on the phone until removed there. Cancel the host's scheduled maintain() yourself.
@@ -445,6 +624,8 @@ export class SignalClient {
 		this.#senderCertificate = undefined;
 		this.#senderCertificateFetch = undefined; // a fetch still in flight is for the forgotten account
 		this.#senderCertificateRetryAt = 0;
+		this.#registration = undefined;
+		this.#verifying = undefined;
 		this.#receive = { connected: false, envelopes: 0, stored: 0, ignored: 0, failed: 0, kinds: {} };
 		this.#link = { state: "unlinked" };
 		return this.#link;
@@ -796,7 +977,32 @@ export class SignalClient {
 			const ctx = this.#sendContext(a, stores, identities);
 			// Note to Self's own timer, or the phone would read the code as turning it off.
 			const expiry = this.#chatTimers().forSend(`aci:${a.aci}`);
-			await sendToServiceId(ctx, a.aci, contentWithSentTranscript(a.aci, timestamp, dataMessage(body, timestamp, undefined, undefined, [], expiry), []), timestamp);
+			const reached = await sendToServiceId(ctx, a.aci, contentWithSentTranscript(a.aci, timestamp, dataMessage(body, timestamp, undefined, undefined, [], expiry), []), timestamp);
+			if (!reached.length) throw new Error("this account has no other devices to show a Note to Self on");
+		});
+	}
+
+	/**
+	 * A 1:1 message to `to` (an ACI) that isn't stored, logged or synced to our other devices: for
+	 * one-time codes sent to someone else, e.g. the owner of a standalone account (which has no
+	 * other devices to show a Note to Self on). Carries our profile key and the chat's timer.
+	 */
+	async notifyContact(to: string, body: string): Promise<void> {
+		const target = to.replace(/^aci:/, "").toLowerCase();
+		if (!ACI_PATTERN.test(target)) throw new Error("recipient must be an ACI (UUID)");
+		const generation = this.#generation;
+		const a = await this.#loadSecrets();
+		if (target === a.aci) return this.notifySelf(body);
+		const stores = await this.#loadStores();
+		const identities = await this.#identities();
+		const key = await this.#accessKey(target);
+		const sealedSender = key && (await this.#sealedSender(a));
+		await this.#withProtocolLock(generation, async () => {
+			const timestamp = Date.now();
+			const ctx = this.#sendContext(a, stores, identities, undefined, sealedSender);
+			const expiry = this.#chatTimers().forSend(`aci:${target}`);
+			const data = dataMessage(body, timestamp, fromBase64(a.profileKey), undefined, [], expiry);
+			await sendToServiceId(ctx, target, contentWithData(data), timestamp, { accessKey: key, contentHint: CONTENT_HINT.RESENDABLE });
 		});
 	}
 
@@ -845,6 +1051,7 @@ export class SignalClient {
 				result.sealedSender = !!ctx.sealedTo?.includes(target);
 				this.#count(result.sealedSender ? "send:sealed" : "send:authenticated");
 			}
+			// A primary account without linked devices reaches nobody here ([]): Note to Self is then kept here only.
 			try {
 				result.syncedDevices = await sendToServiceId(ctx, a.aci, contentWithSentTranscript(target, timestamp, data, isSelf ? [] : [target], ctx.sealedTo), timestamp);
 			} catch (e) {

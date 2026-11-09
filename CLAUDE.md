@@ -1,6 +1,6 @@
 # CLAUDE.md: context for working on signal-edge
 
-A Signal linked-device client library, Workers first, runtime-pluggable. Extracted from the owner's private Workers app (synced on 2026-11-08), which is its main user and the place where things get verified against a real account. That app is private: don't name it or link to it in this repository (docs, code, commit messages). See README.md for the layers and API.
+A Signal client library, Workers first, runtime-pluggable: a linked device, or a standalone primary account registered with a phone number (`src/protocol/registration.ts`, after Signal-Desktop's standalone registration in nightly builds). Extracted from the owner's private Workers app (synced on 2026-11-08), which is its main user and the place where things get verified against a real account. That app is private: don't name it or link to it in this repository (docs, code, commit messages). See README.md for the layers and API.
 
 ## Layout
 - `src/client.ts` `SignalClient`: the account (linking, receive loop, sending, directory, retries, keys). No host APIs: storage is `SqlDatabase` (src/sql.ts); background work, scheduling and new-message notification are options (`waitUntil`, `scheduleMaintenance`, `onMessages`).

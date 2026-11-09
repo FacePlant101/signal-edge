@@ -154,7 +154,7 @@ signal-edge stands on Signal's own work. Thanks to:
 - **[rustls](https://github.com/rustls/rustls)** and **[ring](https://github.com/briansmith/ring)**: the TLS 1.3 stack inside `tls/`.
 - **[wasm-bindgen](https://github.com/rustwasm/wasm-bindgen)**, the **[RustCrypto](https://github.com/RustCrypto)** crates, **[curve25519-dalek](https://github.com/dalek-cryptography/curve25519-dalek)**, **[libcrux](https://github.com/cryspen/libcrux)** and the other crates listed in [THIRD_PARTY_LICENSES.txt](THIRD_PARTY_LICENSES.txt), with their licenses.
 
-Written by FacePlant101, with [Claude Code](https://claude.com/claude-code).
+Written by FacePlant101.
 
 "Signal" is a trademark of Signal Messenger, LLC. signal-edge is an independent, unofficial project, not affiliated with or endorsed by Signal Messenger, LLC. See [NOTICE](NOTICE).
 

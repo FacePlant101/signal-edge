@@ -33,6 +33,7 @@ export const group_send_endorsements_expiration: (a: number, b: number) => [numb
 export const group_send_full_token: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
 export const master_key_from_entropy_pool: (a: number, b: number) => [number, number, number, number];
 export const receive_auth_credential: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number, number, number];
+export const receive_auth_credential_without_pni: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number, number, number];
 export const receive_group_send_endorsements: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number, number, number];
 export const seal: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number, n: number, o: number) => [number, number, number, number];
 export const seal_multi_recipient: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number, n: number, o: number, p: number, q: number, r: number, s: number) => [number, number, number, number];

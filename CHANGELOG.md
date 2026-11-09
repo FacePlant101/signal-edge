@@ -2,6 +2,12 @@
 
 signal-edge follows [semantic versioning](https://semver.org) for 0.x: a breaking change bumps the minor version.
 
+## 0.4.0
+
+- **Signal Login (accounts without a phone number)**: `loginWithAccountKey(accountId, accountKey, { totp? })` makes this device the primary of an existing account, proven with Signal Login's Account ID (the ACI) and Account Key (the account entropy pool) through Signal-Server's recovery by account identifier (`POST /v1/registration` with the registration recovery password). Accounts are registered without a phone number in Signal's Android app (a one-time in-app purchase); this takes such an account over, so a number Signal won't accept is no obstacle. The device that had the account is signed out. The account gets new identity keys and registration ids (contacts see a new safety number); its profile key is restored from the storage service's account record and the server is given its access key. Works for accounts with a phone number too.
+- Accounts without a phone number work as linked devices as well: the `optionalPhoneNumber` capability is now set (Signal-Server refuses to link a device without it to such an account), and group auth credentials for an account without a PNI are received with its auth credential salt (`receive_auth_credential_without_pni` in the WASM, libsignal's `AuthCredentialWithPniResponse::receive_without_pni`).
+- `registerAccount` takes `recoverAci` (and `totp`) instead of `sessionId`; `accountAttributes`, `setAccountAttributes`, `parseAccountId` and `parseAccountKey` are exported. `readStorage` also returns the account record (`account.profileKey`, names).
+
 ## 0.3.0
 
 - **Standalone registration**: a phone number can be registered as a new account with this device as its primary, no phone app needed, following Signal-Desktop's standalone registration (nightly builds): `startRegistration(number)` → `submitCaptcha(token)` → `requestCode("sms" | "voice")` → `verifyCode(code)`. The account gets new identity keys, registration ids, profile key and account entropy pool (with its registration recovery password). `status()` reports `{ state: "registering", step }` meanwhile and `primary: true` once registered. No PIN or registration lock yet (SVR2 needs SGX attestation). The REST calls are exported too (`createVerificationSession`, `submitCaptcha`, `requestVerificationCode`, `submitVerificationCode`, `registerAccount`, `registrationBody`); a second `verifyCode()` while one runs shares it, and one after a failed account creation goes straight to creating the account.

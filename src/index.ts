@@ -64,7 +64,7 @@ export { sendWithSenderKey, senderKeyUsable, SenderKeyShares, createSenderKeySch
 export { Counters, createCounterSchema, describeCounters, FEATURE_COUNTERS, type LastingCounter, type LastError } from "./counters.js";
 export { DecryptFailure, SendLog, SeenEnvelopes, createRetrySchema, type FailedMessage } from "./protocol/retry.js";
 export { Directory, createDirectorySchema, groupIdFromMasterKey, fetchGroupState, fetchCredentials, type GroupRecord, type GroupMember, type Contact } from "./protocol/groups.js";
-export { readStorage, STORAGE_HOST, type StorageSnapshot, type StorageContact, type StorageGroup } from "./protocol/storage-service.js";
+export { readStorage, STORAGE_HOST, type StorageSnapshot, type StorageContact, type StorageGroup, type StorageAccount } from "./protocol/storage-service.js";
 export { downloadAttachment, decryptAttachment, uploadAttachment, attachmentPointer, LONG_TEXT_TYPE, type AttachmentPointer } from "./protocol/attachments.js";
 export { accessKey, unseal, libsignalExtra, CONTENT_HINT } from "./protocol/sealed.js";
 export {
@@ -75,6 +75,10 @@ export {
 	submitVerificationCode,
 	registerAccount,
 	registrationBody,
+	accountAttributes,
+	setAccountAttributes,
+	parseAccountId,
+	parseAccountKey,
 	generateAccountEntropyPool,
 	registrationRecoveryPassword,
 	RegistrationError,

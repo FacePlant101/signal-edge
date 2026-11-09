@@ -479,6 +479,45 @@ export function receive_auth_credential(server_public_params, aci, pni, redempti
 }
 
 /**
+ * The same for an account without a phone number (Signal Login): the server binds the credential
+ * to a PNI derived from our ACI and the account's auth credential salt (in the response to
+ * `POST /v1/registration` and `GET /v1/accounts/whoami`) instead of a real PNI.
+ * @param {Uint8Array | number[]} server_public_params
+ * @param {string} aci
+ * @param {Uint8Array | number[]} auth_credential_salt
+ * @param {number} redemption_time_secs
+ * @param {Uint8Array | number[]} response
+ * @returns {Uint8Array}
+ */
+export function receive_auth_credential_without_pni(server_public_params, aci, auth_credential_salt, redemption_time_secs, response) {
+    const val5 = +redemption_time_secs;
+    let ptr0, len0, ptr1, len1, ptr2, len2, ptr3, len3;
+    try {
+        ptr0 = passArray8ToWasm0(server_public_params, wasm.__wbindgen_malloc);
+        len0 = WASM_VECTOR_LEN;
+        ptr1 = passStringToWasm0(aci, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        len1 = WASM_VECTOR_LEN;
+        ptr2 = passArray8ToWasm0(auth_credential_salt, wasm.__wbindgen_malloc);
+        len2 = WASM_VECTOR_LEN;
+        ptr3 = passArray8ToWasm0(response, wasm.__wbindgen_malloc);
+        len3 = WASM_VECTOR_LEN;
+    } catch (e) {
+        if (ptr3) { wasm.__wbindgen_free(ptr3, len3 * 1, 1); }
+        if (ptr2) { wasm.__wbindgen_free(ptr2, len2 * 1, 1); }
+        if (ptr1) { wasm.__wbindgen_free(ptr1, len1 * 1, 1); }
+        if (ptr0) { wasm.__wbindgen_free(ptr0, len0 * 1, 1); }
+        throw e;
+    }
+    const ret = wasm.receive_auth_credential_without_pni(ptr0, len0, ptr1, len1, ptr2, len2, val5, ptr3, len3);
+    if (ret[3]) {
+        throw takeFromExternrefTable0(ret[2]);
+    }
+    var v6 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
+    wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
+    return v6;
+}
+
+/**
  * Verifies `GroupResponse.group_send_endorsements_response` for the group's full member list
  * (`member_acis`, our own ACI included, as Desktop `receiveWithServiceIds`) and returns one
  * serialized endorsement per member, in that order, back to back.

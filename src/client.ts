@@ -47,12 +47,16 @@ import { blob, type SqlDatabase, type SqlValue } from "./sql.js";
 import { dec, enc, fromBase64, randomBytes, toBase64 } from "./util/bytes.js";
 import { Sealer } from "./util/sealer.js";
 import {
+	accountAttributes,
 	createVerificationSession,
 	generateAccountEntropyPool,
+	parseAccountId,
+	parseAccountKey,
 	registerAccount,
 	registrationRecoveryPassword,
 	requestVerificationCode,
 	submitCaptcha as submitCaptchaToSession,
+	setAccountAttributes,
 	submitVerificationCode,
 	type VerificationSession,
 	type VerificationTransport,
@@ -231,8 +235,10 @@ export type ReceiveState = {
 	lastRetryError?: string;
 };
 
-// Signal-Desktop ts/util/getCapabilities.std.ts, for a device linked with a phone number.
-const CAPABILITIES = { attachmentBackfill: false, spqr: true, usernameChangeSyncMessage: true, optionalPhoneNumber: false };
+// Signal-Desktop ts/util/getCapabilities.std.ts. optionalPhoneNumber: this device also works with an
+// account without a phone number (Signal Login): no PNI, group credentials from the auth credential salt.
+// Signal-Server refuses to link a device without it to such an account.
+const CAPABILITIES = { attachmentBackfill: false, spqr: true, usernameChangeSyncMessage: true, optionalPhoneNumber: true };
 
 export type SignalClientOptions = {
 	/** Synchronous SQLite: Durable Object storage (`durableObjectSql`), node:sqlite, better-sqlite3. */
@@ -346,6 +352,7 @@ export class SignalClient {
 	#registration?: Registration;
 	/** A verifyCode() in progress: a second call (e.g. a double click) waits for it instead of registering again. */
 	#verifying?: Promise<LinkState>;
+	#loggingIn?: Promise<LinkState>;
 
 	/** Creates the tables if needed and reads the link state. Synchronous; no network. */
 	constructor(opts: SignalClientOptions) {
@@ -584,6 +591,126 @@ export class SignalClient {
 		};
 	}
 
+	// --- Signal Login: recover an account by its Account ID and Account Key ---
+
+	/**
+	 * Makes this device the primary of an existing account, identified by Signal Login's "Account ID"
+	 * (its ACI) and proven with the "Account Key" (its account entropy pool): Signal-Server's recovery
+	 * by account identifier. Meant for accounts without a phone number, registered in Signal's app with
+	 * Signal Login, but works for any account whose entropy pool you have. The device that had the
+	 * account is signed out. New identity keys, so contacts see a new safety number; the profile key
+	 * comes back from the storage service. `totp`: when the account has TOTP two-factor authentication.
+	 */
+	loginWithAccountKey(accountId: string, accountKey: string, opts: { totp?: number } = {}): Promise<LinkState> {
+		// Two at once would race two passwords and key sets; the second call shares the first.
+		this.#loggingIn ??= this.#loginWithAccountKey(accountId, accountKey, opts).finally(() => (this.#loggingIn = undefined));
+		return this.#loggingIn;
+	}
+
+	async #loginWithAccountKey(accountId: string, accountKey: string, opts: { totp?: number }): Promise<LinkState> {
+		if (this.#link.state === "linked") throw new Error("already linked or registered; reset() first");
+		const aci = parseAccountId(accountId);
+		const accountEntropyPool = parseAccountKey(accountKey);
+		if (opts.totp !== undefined && !(Number.isInteger(opts.totp) && opts.totp >= 0 && opts.totp < 1_000_000)) throw new Error("the TOTP code is six digits");
+		await this.#sealer(); // fail before any server call if the storage key is missing
+		await this.#socket?.close().catch(() => {}); // a QR code shown for linking no longer applies
+		this.#registration = undefined;
+		const generation = this.#generation;
+		const secrets = await this.#recoverPrimaryAccount(aci, accountEntropyPool, opts.totp);
+		const sealed = await this.#sealSecrets(secrets);
+		// Forgotten (reset) while the server recovered the account: this instance keeps nothing.
+		this.#stillCurrent(generation);
+		this.#put("account_secrets", sealed);
+		this.#stores = undefined;
+		this.#setLink({ state: "linked", aci: secrets.aci, pni: secrets.pni, number: secrets.number, deviceId: secrets.deviceId, linkedAt: secrets.linkedAt, primary: true });
+		// Our old profile key, so contacts' sealed-sender access and our profile keep working. Best effort:
+		// without it the account works with the new key.
+		await this.#restoreProfileKey(generation).catch((e) => this.#lasting((c) => c.error("login-profile-key", String(e))));
+		// The watchdog uploads one-time prekeys (none are on the server yet) and opens the chat socket.
+		this.#schedule(Date.now());
+		return this.#link;
+	}
+
+	/** Signal-Server RegistrationController#recoverAccount, as the primary device (device 1). */
+	async #recoverPrimaryAccount(aci: string, accountEntropyPool: string, totp: number | undefined): Promise<AccountSecrets> {
+		const sig = signal();
+		const newPair = () => identityPair(sig.WasmPrivateKey.generate().serialize());
+		const aciPair = newPair();
+		// The server requires PNI keys when recovering by ACI, and ignores them for an account without a phone number.
+		const pniPair = newPair();
+		const publicKey = (pair: Uint8Array) => toBase64(sig.WasmIdentityKeyPair.deserialize(pair).public_key.serialize());
+		const aciKeys = await lastResortKeys(aciPair);
+		const pniKeys = await lastResortKeys(pniPair);
+		const password = toBase64(randomBytes(16)).slice(0, -2);
+		const registrationId = sig.generateRegistrationId();
+		const pniRegistrationId = sig.generateRegistrationId();
+		// Replaced by the account's own profile key from the storage service right after (#restoreProfileKey).
+		const profileKey = randomBytes(32);
+		const masterKey = libsignalExtra().master_key_from_entropy_pool(accountEntropyPool);
+		const res = await registerAccount({
+			recoverAci: aci,
+			totp,
+			password,
+			registrationId,
+			pniRegistrationId,
+			aciIdentityKey: publicKey(aciPair),
+			pniIdentityKey: publicKey(pniPair),
+			aciSignedPreKey: aciKeys.signed.upload,
+			pniSignedPreKey: pniKeys.signed.upload,
+			aciPqLastResortPreKey: aciKeys.kyber.upload,
+			pniPqLastResortPreKey: pniKeys.kyber.upload,
+			unidentifiedAccessKey: accessKey(profileKey),
+			recoveryPassword: await registrationRecoveryPassword(masterKey),
+			capabilities: CAPABILITIES,
+			discoverableByPhoneNumber: false,
+		});
+		if (res.aci !== aci) throw new Error(`the server recovered ${res.aci}, expected ${aci}`);
+		// With a phone number the account keeps its PNI, and our PNI keys were set; without one there is no PNI.
+		const pni = res.pni;
+		return {
+			aci: res.aci,
+			pni,
+			number: res.number,
+			deviceId: 1,
+			password,
+			registrationId,
+			pniRegistrationId: pni ? pniRegistrationId : undefined,
+			aciIdentityKeyPair: toBase64(aciPair),
+			pniIdentityKeyPair: pni ? toBase64(pniPair) : undefined,
+			profileKey: toBase64(profileKey),
+			accountEntropyPool,
+			authCredentialSalt: res.authCredentialSalt && toBase64(res.authCredentialSalt),
+			readReceipts: false,
+			signedPreKeys: { aci: aciKeys.signed.stored, pni: pni ? pniKeys.signed.stored : undefined },
+			kyberLastResortPreKeys: { aci: aciKeys.kyber.stored, pni: pni ? pniKeys.kyber.stored : undefined },
+			linkedAt: Date.now(),
+			primary: true,
+		};
+	}
+
+	/** After a recovery: takes the account's profile key back from its storage-service account record and tells the server its access key. */
+	async #restoreProfileKey(generation: number): Promise<void> {
+		const a = await this.#loadSecrets();
+		const masterKey = this.#accountMasterKey(a);
+		const snapshot = await readStorage(deviceAuth(a), masterKey);
+		const old = snapshot.account?.profileKey;
+		if (!old || toBase64(old) === a.profileKey) return;
+		await setAccountAttributes(
+			deviceAuth(a),
+			accountAttributes({
+				registrationId: a.registrationId,
+				pniRegistrationId: a.pniRegistrationId,
+				capabilities: CAPABILITIES,
+				unidentifiedAccessKey: accessKey(old),
+				discoverableByPhoneNumber: false,
+				recoveryPassword: await registrationRecoveryPassword(masterKey),
+			}),
+		);
+		const sealed = await this.#sealSecrets({ ...a, profileKey: toBase64(old) });
+		this.#stillCurrent(generation);
+		this.#put("account_secrets", sealed);
+	}
+
 	/**
 	 * Forgets the linked account locally: closes the sockets and empties SIGNAL_TABLES. The device stays
 	 * listed on the phone until removed there. Cancel the host's scheduled maintain() yourself.
@@ -626,6 +753,7 @@ export class SignalClient {
 		this.#senderCertificateRetryAt = 0;
 		this.#registration = undefined;
 		this.#verifying = undefined;
+		this.#loggingIn = undefined;
 		this.#receive = { connected: false, envelopes: 0, stored: 0, ignored: 0, failed: 0, kinds: {} };
 		this.#link = { state: "unlinked" };
 		return this.#link;
@@ -1749,7 +1877,7 @@ export class SignalClient {
 		let today = credentialForToday(credentials);
 		if (!today) {
 			const a = await this.#loadSecrets();
-			credentials = await fetchCredentials(deviceAuth(a), a.aci, a.pni);
+			credentials = await fetchCredentials(deviceAuth(a), a.aci, a.pni, a.authCredentialSalt ? fromBase64(a.authCredentialSalt) : undefined);
 			const sealed = await sealer.seal("group_credentials", enc.encode(JSON.stringify(credentials)));
 			// Fetched for an account forgotten meanwhile: the next account mustn't use (or keep) them.
 			this.#stillCurrent(generation);

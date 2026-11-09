@@ -102,6 +102,13 @@ export function master_key_from_entropy_pool(pool: string): Uint8Array;
 export function receive_auth_credential(server_public_params: Uint8Array | number[], aci: string, pni: string, redemption_time_secs: number, response: Uint8Array | number[]): Uint8Array;
 
 /**
+ * The same for an account without a phone number (Signal Login): the server binds the credential
+ * to a PNI derived from our ACI and the account's auth credential salt (in the response to
+ * `POST /v1/registration` and `GET /v1/accounts/whoami`) instead of a real PNI.
+ */
+export function receive_auth_credential_without_pni(server_public_params: Uint8Array | number[], aci: string, auth_credential_salt: Uint8Array | number[], redemption_time_secs: number, response: Uint8Array | number[]): Uint8Array;
+
+/**
  * Verifies `GroupResponse.group_send_endorsements_response` for the group's full member list
  * (`member_acis`, our own ACI included, as Desktop `receiveWithServiceIds`) and returns one
  * serialized endorsement per member, in that order, back to back.
@@ -196,6 +203,7 @@ export interface InitOutput {
     readonly group_send_full_token: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
     readonly master_key_from_entropy_pool: (a: number, b: number) => [number, number, number, number];
     readonly receive_auth_credential: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number, number, number];
+    readonly receive_auth_credential_without_pni: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number, number, number];
     readonly receive_group_send_endorsements: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number, number, number];
     readonly seal: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number, n: number, o: number) => [number, number, number, number];
     readonly seal_multi_recipient: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number, n: number, o: number, p: number, q: number, r: number, s: number) => [number, number, number, number];

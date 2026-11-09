@@ -325,6 +325,85 @@ test("registration calls reject (not throw) on bad input", async () => {
 	}
 });
 
+// --- Signal Login: recovering an account by Account ID and Account Key (no network) ---
+
+test("Account IDs and Account Keys are read the way the app shows them", async () => {
+	const { parseAccountId, parseAccountKey } = await import("../dist/index.js");
+	const id = "1b9c2f0e-4d6a-4c3b-9e8f-0a1b2c3d4e5f";
+	for (const shown of [id, id.toUpperCase(), id.replace(/-/g, ""), `ACI:${id}`, ` ${id.toUpperCase().replace(/-/g, " ")} `]) {
+		assert.equal(parseAccountId(shown), id, shown);
+	}
+	for (const bad of ["", "1b9c2f0e", `${id}0`, "zz9c2f0e-4d6a-4c3b-9e8f-0a1b2c3d4e5f", "+4712345678"]) assert.throws(() => parseAccountId(bad), /Account ID/, bad);
+	const aep = "0123456789abcdefghijklmnopqrstuvwxyz0123456789abcdefghijklmnopqr";
+	assert.equal(parseAccountKey(aep.toUpperCase().match(/.{4}/g).join(" ")), aep);
+	assert.equal(parseAccountKey(aep.match(/.{4}/g).join("-")), aep);
+	for (const bad of ["", aep.slice(1), `${aep}x`, `${aep.slice(1)}!`]) assert.throws(() => parseAccountKey(bad), /Account Key/);
+});
+
+test("the recovery body carries the recovery password instead of a session", async () => {
+	const { registrationBody } = await import("../dist/index.js");
+	const key = (id) => ({ keyId: id, publicKey: "cHVi", signature: "c2ln" });
+	const request = {
+		recoverAci: "1b9c2f0e-4d6a-4c3b-9e8f-0a1b2c3d4e5f",
+		password: "pw",
+		registrationId: 123,
+		pniRegistrationId: 456,
+		aciIdentityKey: "YWNp",
+		pniIdentityKey: "cG5p",
+		aciSignedPreKey: key(1),
+		pniSignedPreKey: key(2),
+		aciPqLastResortPreKey: key(3),
+		pniPqLastResortPreKey: key(4),
+		unidentifiedAccessKey: new Uint8Array([117, 110, 105, 100]),
+		recoveryPassword: new TextEncoder().encode("recovery"),
+		capabilities: { optionalPhoneNumber: true },
+		discoverableByPhoneNumber: false,
+	};
+	const body = registrationBody(request);
+	assert.equal("sessionId" in body, false);
+	assert.equal(body.recoveryPassword, "cmVjb3Zlcnk=");
+	assert.equal(body.accountAttributes.recoveryPassword, "cmVjb3Zlcnk=", "kept for later recoveries");
+	assert.equal("totp" in body, false);
+	assert.equal(body.skipDeviceTransfer, true);
+	// Signal-Server requires PNI keys when recovering by ACI, even for an account without a phone number.
+	assert.equal(body.pniIdentityKey, "cG5p");
+	assert.equal(body.accountAttributes.pniRegistrationId, 456);
+	assert.equal(registrationBody({ ...request, totp: 123456 }).totp, 123456);
+});
+
+test("account attributes leave out the PNI registration id of an account without one", async () => {
+	const { accountAttributes } = await import("../dist/index.js");
+	const attrs = accountAttributes({ registrationId: 1, capabilities: {}, unidentifiedAccessKey: new Uint8Array(16), discoverableByPhoneNumber: false, recoveryPassword: new Uint8Array(32) });
+	assert.equal("pniRegistrationId" in JSON.parse(JSON.stringify(attrs)), false);
+});
+
+test("registerAccount wants exactly one of a session or an ACI to recover, before any network call", async () => {
+	const { registerAccount } = await import("../dist/index.js");
+	const base = { password: "pw", registrationId: 1, pniRegistrationId: 2, recoveryPassword: new Uint8Array(32), unidentifiedAccessKey: new Uint8Array(16), capabilities: {}, discoverableByPhoneNumber: false };
+	await assert.rejects(registerAccount(base), /either a verified sessionId/);
+	await assert.rejects(registerAccount({ ...base, sessionId: "s", recoverAci: "1b9c2f0e-4d6a-4c3b-9e8f-0a1b2c3d4e5f" }), /either a verified sessionId/);
+	await assert.rejects(registerAccount({ ...base, sessionId: "s" }), /needs the number/);
+	await assert.rejects(registerAccount({ ...base, recoverAci: "not-an-aci" }), /recoverAci must be an ACI/);
+});
+
+test("loginWithAccountKey checks its input before any network call", async () => {
+	const client = new SignalClient({ db: memoryDb(), storageKey: TEST_STORAGE_KEY });
+	const aep = "0".repeat(64);
+	await assert.rejects(client.loginWithAccountKey("nope", aep), /Account ID/);
+	await assert.rejects(client.loginWithAccountKey("1b9c2f0e-4d6a-4c3b-9e8f-0a1b2c3d4e5f", "short"), /Account Key/);
+	await assert.rejects(client.loginWithAccountKey("1b9c2f0e-4d6a-4c3b-9e8f-0a1b2c3d4e5f", aep, { totp: 1_000_000 }), /TOTP/);
+	assert.equal(client.status().state, "unlinked");
+	const noKey = new SignalClient({ db: memoryDb(), storageKey: undefined });
+	await assert.rejects(noKey.loginWithAccountKey("1b9c2f0e-4d6a-4c3b-9e8f-0a1b2c3d4e5f", aep));
+});
+
+test("group credentials for an account without a phone number go through the salt", async () => {
+	const { libsignalExtra } = await import("../dist/index.js");
+	// The export exists and rejects a response that isn't a credential (no server keys here to issue a real one).
+	assert.equal(typeof libsignalExtra().receive_auth_credential_without_pni, "function");
+	assert.throws(() => libsignalExtra().receive_auth_credential_without_pni(new Uint8Array(0), "1b9c2f0e-4d6a-4c3b-9e8f-0a1b2c3d4e5f", new Uint8Array(32), 0, new Uint8Array(4)));
+});
+
 test("account entropy pool characters are uniform (no modulo bias)", async () => {
 	const { generateAccountEntropyPool } = await import("../dist/index.js");
 	const counts = new Map();

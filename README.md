@@ -42,7 +42,7 @@ SignalClient            linking, receive loop, send, contacts/groups, keys, retr
 
 Signal's servers present certificates from Signal's own root CA. `fetch()` on Workers can't verify that (you get HTTP 526), so the library opens a plain TCP socket and runs TLS itself in WebAssembly, pinned to Signal's two root certificates, as libsignal does. WebSockets and HTTP are framed on top of that.
 
-Everything the client stores (sessions, keys, messages, contacts) is encrypted with AES-256-GCM under your storage key. Each row's location is bound into the encryption, so a row copied elsewhere won't decrypt.
+The contents the client stores (account secrets, keys, sessions, message bodies and attachments' keys, contacts' names and profile keys, group state) are encrypted with AES-256-GCM under your storage key, and each row's location is bound into the encryption, so a row copied elsewhere won't decrypt. Metadata used to look rows up is not: account and contact ids (ACIs), conversation ids, authors and timestamps, which groups exist, and error texts. That is who talks to whom and when, so keep the database itself private as well (`nodeSqlite` creates its file with mode 0600). The phone number is only kept sealed.
 
 ## Install
 
@@ -168,7 +168,11 @@ SIGNAL_NETWORK_TESTS=1 npm test   # also connects to Signal's servers (no accoun
 cd examples/worker && npm install && npm run check   # typecheck + wrangler bundle (dry run)
 ```
 
-The WASM in `src/vendor/` is built by GitHub Actions (`.github/workflows/wasm.yml`), reproducibly: a pinned toolchain (`rust-toolchain.toml`, `wasm-bindgen-cli` 0.2.130, Ubuntu 24.04's clang 18) and no local paths in the output. Every change to the Rust code or the binaries is rebuilt in CI and must match the committed files byte for byte, and each build on `main` gets a provenance attestation (`gh attestation verify src/vendor/signal-tls/signal_tls_bg.wasm -R FacePlant101/signal-edge`). After changing `tls/` or `sealed/`, either run `npm run build:tls` / `npm run build:sealed` with that toolchain (rustup, clang and llvm-ar, `wasm-bindgen-cli` 0.2.130, `protoc`) and commit `src/vendor/`, or run the WASM workflow on your branch with `commit` ticked. Releases: bump `version` in package.json and add to CHANGELOG.md in a PR; after it merges, push the tag `v<version>` and the Release workflow publishes to npm. After a change to either `Cargo.lock`, regenerate the license notices with `python3 scripts/third-party-licenses.py` and commit `THIRD_PARTY_LICENSES.txt`.
+The WASM in `src/vendor/` is built by GitHub Actions (`.github/workflows/wasm.yml`), reproducibly: a pinned toolchain (`rust-toolchain.toml`, `wasm-bindgen-cli` 0.2.130, Ubuntu 24.04's clang 18) and no local paths in the output. Every change to the Rust code or the binaries is rebuilt in CI and must match the committed files byte for byte, and each build on `main` gets a provenance attestation (`gh attestation verify src/vendor/signal-tls/signal_tls_bg.wasm -R FacePlant101/signal-edge --signer-workflow FacePlant101/signal-edge/.github/workflows/wasm.yml --source-ref refs/heads/main`). After changing `tls/` or `sealed/`, either run `npm run build:tls` / `npm run build:sealed` with that toolchain (rustup, clang and llvm-ar, `wasm-bindgen-cli` 0.2.130, `protoc`) and commit `src/vendor/`, or run the WASM workflow on your branch with `commit` ticked. Releases: bump `version` in package.json and add to CHANGELOG.md in a PR; after it merges, push the tag `v<version>` and the Release workflow publishes to npm. After a change to either `Cargo.lock`, regenerate the license notices with `python3 scripts/third-party-licenses.py` and commit `THIRD_PARTY_LICENSES.txt`.
+
+## Security
+
+Please report vulnerabilities privately; see [SECURITY.md](SECURITY.md) for how, what is in scope, and what the library assumes.
 
 ## Credits
 

@@ -30,23 +30,77 @@ export function cdnIdFromFixed64(b: Uint8Array | undefined): string | undefined 
 	return id ? id.toString() : undefined;
 }
 
-/** Downloads and decrypts one attachment; `size` is the plaintext length from the pointer. */
-export async function downloadAttachment(p: AttachmentPointer, size: number | undefined): Promise<Uint8Array> {
+/** Default limit for one attachment's plaintext. */
+export const DEFAULT_MAX_ATTACHMENT_BYTES = 25_000_000;
+/** Uploads can be large and slow: their requests get this long. */
+const UPLOAD_TIMEOUT_MS = 10 * 60_000;
+/** Deadline for a whole download, redirects included (large files on slow links take minutes). */
+const DOWNLOAD_TIMEOUT_MS = 10 * 60_000;
+
+export type DownloadOptions = {
+	/** Largest plaintext accepted (default 25 MB). The download stops as soon as more than its encrypted size arrives. */
+	maxBytes?: number;
+	/** Cancels the download and closes its connection. */
+	signal?: AbortSignal;
+	/** Deadline for the whole download, redirects included (default 10 minutes). */
+	timeoutMs?: number;
+};
+
+/**
+ * The most bytes the encrypted blob of a `plaintext`-byte attachment can take: iv, padded and
+ * PKCS#7-padded ciphertext, MAC. Padding is Desktop's logPadSize (at most +5 %); the margin covers
+ * clients that pad a little differently.
+ */
+export function maxEncryptedSize(plaintext: number): number {
+	return Math.ceil(Math.max(paddedSize(plaintext), plaintext) * 1.06) + 16 + 16 + 32 + 1024;
+}
+
+/**
+ * Downloads and decrypts one attachment; `size` is the plaintext length from the pointer. The pointer
+ * comes from the sender, so neither its `size` nor the server's Content-Length is trusted: at most
+ * maxEncryptedSize(min(size, maxBytes)) bytes are read before giving up.
+ */
+export async function downloadAttachment(p: AttachmentPointer, size: number | undefined, opts: DownloadOptions = {}): Promise<Uint8Array> {
+	const maxBytes = opts.maxBytes ?? DEFAULT_MAX_ATTACHMENT_BYTES;
+	if (size !== undefined && size > maxBytes) throw new Error(`attachment is ${size} bytes; the limit is ${maxBytes}`);
+	const limit = maxEncryptedSize(size ?? maxBytes);
 	const host = CDN_HOSTS[p.cdnNumber];
 	const name = p.cdnNumber === 0 ? p.cdnId : p.cdnKey;
 	if (!host || !name) throw new Error(`attachment has no download location (cdn ${p.cdnNumber})`);
 	let url = new URL(`https://${host}/attachments/${encodeURIComponent(name)}`);
+	const timeoutMs = opts.timeoutMs ?? DOWNLOAD_TIMEOUT_MS;
+	const signal = withTimeout(opts.signal, timeoutMs);
 	for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
-		const res = url.hostname.endsWith(".signal.org") && !fetchOnlyHosts.has(url.hostname) ? await signalGetOrFetch(url) : await publicGet(url);
+		const res = url.hostname.endsWith(".signal.org") && !fetchOnlyHosts.has(url.hostname) ? await signalGetOrFetch(url, limit, signal, timeoutMs) : await publicGet(url, limit, signal);
 		if (res.status >= 300 && res.status < 400 && res.location) {
-			url = new URL(res.location, url);
+			url = redirectTarget(url, res.location);
 			continue;
 		}
 		if (res.status === 404) throw new Error("the attachment is no longer on Signal's servers (they expire after about 45 days)");
 		if (res.status !== 200) throw new Error(`attachment download failed: HTTP ${res.status}`);
-		return decryptAttachment(res.body, fromBase64(p.key), p.digest ? fromBase64(p.digest) : undefined, size);
+		const plaintext = await decryptAttachment(res.body, fromBase64(p.key), p.digest ? fromBase64(p.digest) : undefined, size);
+		if (plaintext.length > maxBytes) throw new Error(`attachment is ${plaintext.length} bytes; the limit is ${maxBytes}`);
+		return plaintext;
 	}
 	throw new Error("attachment download: too many redirects");
+}
+
+/**
+ * Where a CDN redirect may send us: https only, and never to a loopback, private or link-local
+ * address (on Node those would be the host's own network). Nothing secret is sent along, but there is
+ * no reason to make requests there.
+ */
+export function redirectTarget(from: URL, location: string): URL {
+	const to = new URL(location, from);
+	if (to.protocol !== "https:") throw new Error(`attachment download: refusing a redirect to ${to.protocol}`);
+	const host = to.hostname.replace(/^\[|\]$/g, "").toLowerCase();
+	const v4 = /^(\d+)\.(\d+)\.(\d+)\.(\d+)$/.exec(host)?.slice(1).map(Number);
+	const privateV4 = v4 && (v4[0] === 0 || v4[0] === 10 || v4[0] === 127 || (v4[0] === 169 && v4[1] === 254) || (v4[0] === 172 && v4[1]! >= 16 && v4[1]! <= 31) || (v4[0] === 192 && v4[1] === 168) || (v4[0] === 100 && v4[1]! >= 64 && v4[1]! <= 127));
+	const privateV6 = host.includes(":") && (host === "::" || host === "::1" || /^f[cd]/.test(host) || /^fe[89ab]/.test(host) || host.startsWith("::ffff:"));
+	if (host === "localhost" || host.endsWith(".localhost") || host.endsWith(".local") || host.endsWith(".internal") || privateV4 || privateV6) {
+		throw new Error(`attachment download: refusing a redirect to ${host}`);
+	}
+	return to;
 }
 
 /** workerd's refusal to open a raw socket to a Cloudflare IP ("proxy request failed ... consider using fetch instead"). */
@@ -54,26 +108,51 @@ function refusesSockets(e: unknown): boolean {
 	return /proxy request failed|consider using fetch/i.test(String(e));
 }
 
+type Got = { status: number; location?: string; body: Uint8Array };
+
 /** signalGet, falling back to fetch() when the socket can't reach the host because Cloudflare fronts it. */
-async function signalGetOrFetch(url: URL): Promise<{ status: number; location?: string; body: Uint8Array }> {
+async function signalGetOrFetch(url: URL, limit: number, signal: AbortSignal, timeoutMs: number): Promise<Got> {
 	try {
-		return await signalGet(url);
+		return await signalGet(url, limit, signal, timeoutMs);
 	} catch (e) {
 		if (!refusesSockets(e)) throw e;
 		console.warn(`attachment download: ${url.hostname} refuses raw sockets (behind Cloudflare); using fetch()`);
 		fetchOnlyHosts.add(url.hostname);
-		return publicGet(url);
+		return publicGet(url, limit, signal);
 	}
 }
 
-async function signalGet(url: URL): Promise<{ status: number; location?: string; body: Uint8Array }> {
-	const res = await signalFetch(url.hostname, "GET", url.pathname + url.search);
+async function signalGet(url: URL, limit: number, signal: AbortSignal, timeoutMs: number): Promise<Got> {
+	const res = await signalFetch(url.hostname, "GET", url.pathname + url.search, { maxBytes: limit, signal, timeoutMs });
 	return { status: res.status, location: res.headers.get("location") ?? undefined, body: res.body };
 }
 
-async function publicGet(url: URL): Promise<{ status: number; location?: string; body: Uint8Array }> {
-	const res = await fetch(url, { redirect: "manual" });
-	return { status: res.status, location: res.headers.get("location") ?? undefined, body: new Uint8Array(await res.arrayBuffer()) };
+/** fetch(), reading at most `limit` bytes of the body; `signal` carries the deadline. */
+async function publicGet(url: URL, limit: number, signal: AbortSignal): Promise<Got> {
+	const res = await fetch(url, { redirect: "manual", signal });
+	const location = res.headers.get("location") ?? undefined;
+	const tooLarge = () => new Error(`attachment download: response larger than ${limit} bytes`);
+	const declared = Number(res.headers.get("content-length") ?? NaN);
+	if (declared > limit) {
+		await res.body?.cancel().catch(() => {});
+		throw tooLarge();
+	}
+	const parts: Uint8Array[] = [];
+	let total = 0;
+	const reader = res.body?.getReader();
+	if (reader) {
+		for (;;) {
+			const { value, done } = await reader.read();
+			if (done) break;
+			total += value.length;
+			if (total > limit) {
+				await reader.cancel().catch(() => {});
+				throw tooLarge();
+			}
+			parts.push(value);
+		}
+	}
+	return { status: res.status, location, body: concat(...parts) };
 }
 
 /**
@@ -147,7 +226,7 @@ export async function uploadAttachment(auth: string, plaintext: Uint8Array): Pro
 async function uploadRequest(url: URL, method: string, headers: Record<string, string>, body?: Uint8Array): Promise<{ status: number; header(name: string): string | undefined }> {
 	if (url.hostname.endsWith(".signal.org") && !fetchOnlyHosts.has(url.hostname)) {
 		try {
-			const res = await signalFetch(url.hostname, method, url.pathname + url.search, { headers, body });
+			const res = await signalFetch(url.hostname, method, url.pathname + url.search, { headers, body, timeoutMs: UPLOAD_TIMEOUT_MS });
 			return { status: res.status, header: (n) => res.headers.get(n) ?? undefined };
 		} catch (e) {
 			if (!refusesSockets(e)) throw e;
@@ -155,8 +234,9 @@ async function uploadRequest(url: URL, method: string, headers: Record<string, s
 			fetchOnlyHosts.add(url.hostname);
 		}
 	}
-	const res = await fetch(url, { method, headers, body, redirect: "manual" });
-	await res.arrayBuffer();
+	// fetch() has no deadline of its own; the response body isn't needed.
+	const res = await fetch(url, { method, headers, body, redirect: "manual", signal: AbortSignal.timeout(UPLOAD_TIMEOUT_MS) });
+	await res.body?.cancel().catch(() => {});
 	return { status: res.status, header: (n) => res.headers.get(n) ?? undefined };
 }
 
@@ -249,4 +329,10 @@ export async function expandLongText(
 		}
 	}
 	return { expanded, failed };
+}
+
+/** `signal` (if any) combined with a deadline `ms` from now. */
+function withTimeout(signal: AbortSignal | undefined, ms: number): AbortSignal {
+	const deadline = AbortSignal.timeout(ms);
+	return signal ? AbortSignal.any([signal, deadline]) : deadline;
 }

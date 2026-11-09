@@ -7,6 +7,7 @@ import { DecryptFailure } from "./retry.js";
 import { unseal } from "./sealed.js";
 import type { OurIdentity, ProtocolStore } from "./store.js";
 import { signal } from "./wasm.js";
+import { timingSafeEqual } from "../util/bytes.js";
 
 export type Self = { aci: string; pni?: string; deviceId: number };
 
@@ -71,6 +72,11 @@ export async function receiveEnvelope(
 	if (type === CIPHERTEXT.WHISPER || type === CIPHERTEXT.PREKEY) {
 		// A new session carries the sender's identity key: check it against our record first.
 		const identityKey = type === CIPHERTEXT.PREKEY ? preKeyMessageIdentity(ciphertext) : undefined;
+		// Our own other devices share our ACI identity key; anything else claiming to be us (only the
+		// server could send it) is refused, since our own account's messages may carry sync transcripts.
+		if (identityKey && sender === self.aci && !timingSafeEqual(identityKey, ourIdentityKey(identityPairs.aci))) {
+			throw new Error("a PreKey message from our own account carries a different identity key");
+		}
 		const check = identityKey && (await identities.check(sender, identityKey));
 		if (check === "changed") store.resetIdentityStore(); // else libsignal rejects the new key until restart
 		const wasmType = type === CIPHERTEXT.PREKEY ? sig.message_type_pre_key() : sig.message_type_signal();
@@ -92,7 +98,8 @@ export async function receiveEnvelope(
 		return { status: "ignored", reason: `unknown message type ${type}` };
 	}
 
-	let parsed = parseContent(plaintext, sender, device, self.aci, sealedGroupId);
+	// The sealed layer's group id is the sender's word and routes nothing; retry requests keep it (above).
+	let parsed = parseContent(plaintext, sender, device, self.aci);
 	// PlaintextContent isn't end-to-end authenticated: as Desktop, use only its DecryptionErrorMessage.
 	if (type === CIPHERTEXT.PLAINTEXT) {
 		parsed = { records: [], decryptionError: parsed.decryptionError, kinds: parsed.decryptionError ? ["decryption-error"] : ["plaintext:ignored"], groups: [], timers: [] };
@@ -103,4 +110,10 @@ export async function receiveEnvelope(
 		await aci.saveSenderKey(sender, device, distributionId(parsed.senderKeyDistribution, false));
 	}
 	return { status: "decrypted", sender, senderDevice: device, parsed, serverGuid: env.serverGuid, identityChanged };
+}
+
+/** The public half (33 bytes) of a serialized identity key pair; empty when there is none. */
+function ourIdentityKey(pair: Uint8Array | undefined): Uint8Array {
+	if (!pair) return new Uint8Array(0);
+	return signal().WasmIdentityKeyPair.deserialize(pair).public_key.serialize();
 }

@@ -161,14 +161,19 @@ export class Limiter {
 
 	/** Allows (and counts) one hit only if every limit has room, so a refusal uses up none of them. */
 	allow(limits: { key: string; max: number; windowMs: number }[], now = Date.now()): boolean {
+		return this.refusal(limits, now) === undefined;
+	}
+
+	/** As allow(), but tells which limit refused: undefined when the hit went through, else that limit's key. */
+	refusal(limits: { key: string; max: number; windowMs: number }[], now = Date.now()): string | undefined {
 		const current = limits.map((l) => ({ ...l, at: (this.#hits.get(l.key)?.at ?? []).filter((t) => now - t < l.windowMs) }));
-		const ok = current.every((l) => l.at.length < l.max);
+		const full = current.find((l) => l.at.length >= l.max);
 		for (const l of current) {
-			if (ok) l.at.push(now);
+			if (!full) l.at.push(now);
 			this.#hits.set(l.key, { windowMs: l.windowMs, at: l.at });
 		}
 		// Each key is pruned by its own window (a per-message 24 h limit must outlive hourly ones).
 		if (this.#hits.size > 1000) for (const [k, v] of this.#hits) if (!v.at.some((t) => now - t < v.windowMs)) this.#hits.delete(k);
-		return ok;
+		return full?.key;
 	}
 }

@@ -3,6 +3,7 @@
  * WASM modules read from this package, already configured; plus SQLite storage (`nodeSqlite`) and a
  * host that runs maintenance on a timer (`createNodeClient`).
  */
+import { closeSync, existsSync, openSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import net from "node:net";
@@ -65,13 +66,17 @@ export type SqliteDatabaseLike = {
 };
 
 /**
- * SQLite as a SqlDatabase. Pass a file path (opened with node:sqlite, in WAL mode) or an open
- * node:sqlite or better-sqlite3 database. Transactions nest through savepoints.
+ * SQLite as a SqlDatabase. Pass a file path (opened with node:sqlite, in WAL mode; a new file is
+ * created with mode 0600) or an open node:sqlite or better-sqlite3 database. Transactions nest
+ * through savepoints.
  */
 export function nodeSqlite(database: string | SqliteDatabaseLike): SqlDatabase & { close(): void } {
 	let db: SqliteDatabaseLike;
 	let owned = false;
 	if (typeof database === "string") {
+		// Created readable by the owner only: besides sealed rows it holds metadata in the clear (who the
+		// account talks to). SQLite gives its -wal and -shm files the database file's permissions.
+		if (database !== ":memory:" && !database.startsWith("file:") && !existsSync(database)) closeSync(openSync(database, "a", 0o600));
 		const { DatabaseSync } = require("node:sqlite") as { DatabaseSync: new (path: string) => SqliteDatabaseLike };
 		db = new DatabaseSync(database);
 		owned = true;

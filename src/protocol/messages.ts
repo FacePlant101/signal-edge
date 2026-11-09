@@ -35,7 +35,8 @@ export class MessageStore {
 		private readonly sealer: Sealer,
 	) {}
 
-	async add(records: MessageRecord[], serverGuid: string | undefined, receivedAt: number): Promise<number> {
+	/** Stores the records not stored yet; returns how many were. `inserted`, when given, receives those records. */
+	async add(records: MessageRecord[], serverGuid: string | undefined, receivedAt: number, inserted?: MessageRecord[]): Promise<number> {
 		// A resent copy (after a retry request) has a new server guid but the same author and timestamp.
 		const fresh = records.filter(
 			(r) => r.kind === "identity-change" || !(r.sentAt > 0) || !this.sql.exec("SELECT 1 FROM messages WHERE conversation = ? AND sent_at = ? AND author = ? AND kind = ? LIMIT 1", r.conversation, r.sentAt, r.author, r.kind).length,
@@ -44,7 +45,7 @@ export class MessageStore {
 		let added = 0;
 		for (const [r, sealed] of rows) {
 			// RETURNING yields a row only when the insert happened (rowsWritten counts ignored ones too).
-			const inserted = this.sql.exec(
+			const rowsBack = this.sql.exec(
 				"INSERT OR IGNORE INTO messages (server_guid, conversation, author, sent_at, received_at, kind, data) VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING id",
 				serverGuid ?? null,
 				r.conversation,
@@ -54,7 +55,8 @@ export class MessageStore {
 				r.kind,
 				sealed,
 			);
-			added += inserted.length;
+			added += rowsBack.length;
+			if (rowsBack.length) inserted?.push(r);
 		}
 		return added;
 	}
@@ -67,10 +69,14 @@ export class MessageStore {
 	}
 
 	/** The newest stored message or edit in `conversation` with this timestamp (the id shown to MCP clients). */
-	async findSent(conversation: string, sentAt: number): Promise<StoredMessage | undefined> {
-		const row = this.sql
-			.exec<Row>("SELECT id, conversation, author, sent_at, received_at, kind, data FROM messages WHERE conversation = ? AND sent_at = ? AND kind = 'message' ORDER BY id DESC LIMIT 1", conversation, sentAt)
-			[0];
+	async findSent(conversation: string, sentAt: number, author?: string): Promise<StoredMessage | undefined> {
+		// sentAt is the sender's word: with an author, another sender's message at the same time can't stand in.
+		const byAuthor = author === undefined ? "" : " AND author = ?";
+		const bindings = author === undefined ? [conversation, sentAt] : [conversation, sentAt, author];
+		const row = this.sql.exec<Row>(
+			`SELECT id, conversation, author, sent_at, received_at, kind, data FROM messages WHERE conversation = ? AND sent_at = ?${byAuthor} AND kind = 'message' ORDER BY id DESC LIMIT 1`,
+			...bindings,
+		)[0];
 		return row && this.get(row.id);
 	}
 

@@ -145,7 +145,7 @@ export async function sendWithSenderKey(p: SenderKeySend): Promise<SenderKeyResu
 		const unshared = new Set<string>();
 		if (fresh.length) {
 			const skdm = await sig.createSenderKeyDistribution(local(), info.distributionId, store.senderKeys);
-			await store.saveSenderKey(ctx.ourAci, ctx.ourDeviceId, info.distributionId);
+			await store.saveSenderKey(ctx.ourAci, ctx.ourDeviceId, info.distributionId, true);
 			for (const aci of new Set(fresh.map((d) => d.aci))) {
 				let shared = false;
 				try {
@@ -170,7 +170,7 @@ export async function sendWithSenderKey(p: SenderKeySend): Promise<SenderKeyResu
 
 		// One encryption for everyone, sealed per device.
 		const skm = await sig.encryptGroupMessage(local(), info.distributionId, padMessage(p.content), store.senderKeys);
-		await store.saveSenderKey(ctx.ourAci, ctx.ourDeviceId, info.distributionId);
+		await store.saveSenderKey(ctx.ourAci, ctx.ourDeviceId, info.distributionId, true);
 		const sorted = devices.slice().sort((a, b) => (a.aci < b.aci ? -1 : a.aci > b.aci ? 1 : a.device - b.device));
 		const sessions: Uint8Array[] = [];
 		for (const d of sorted) {
@@ -204,6 +204,7 @@ export async function sendWithSenderKey(p: SenderKeySend): Promise<SenderKeyResu
 		const res = await signalFetch(CHAT_HOST, "PUT", `/v1/messages/multi_recipient?ts=${p.timestamp}&online=false&urgent=true&story=false`, {
 			headers: { "Group-Send-Token": toBase64(token), "Content-Type": "application/vnd.signal-messenger.mrm" },
 			body,
+			signal: p.ctx.signal,
 		});
 		const json = () => {
 			try {

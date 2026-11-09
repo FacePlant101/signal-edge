@@ -1,0 +1,65 @@
+# Dependency updates. Weekly, grouped to keep the PR count low, and only for releases at least a
+# week old (a fresh release that turns out malicious is usually pulled by then).
+#
+# Cargo updates change the prebuilt WASM: their PRs fail the WASM workflow's byte-for-byte check
+# until the binaries are rebuilt. Run "WASM" on the PR branch with `commit` ticked, then regenerate
+# THIRD_PARTY_LICENSES.txt (python3 scripts/third-party-licenses.py).
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    open-pull-requests-limit: 5
+    groups:
+      dev-dependencies:
+        dependency-type: development
+    commit-message:
+      prefix: "npm"
+
+  - package-ecosystem: npm
+    directory: /examples/worker
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    open-pull-requests-limit: 2
+    groups:
+      example:
+        patterns: ["*"]
+    commit-message:
+      prefix: "example"
+
+  - package-ecosystem: cargo
+    directories:
+      - /tls
+      - /sealed
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    open-pull-requests-limit: 3
+    ignore:
+      # libsignal is pinned to a tag on purpose and moved by hand, together with the API changes it
+      # brings and a check against @getmaapp/signal-wasm.
+      - dependency-name: "libsignal-*"
+      - dependency-name: "zkgroup"
+    groups:
+      rust:
+        patterns: ["*"]
+    commit-message:
+      prefix: "cargo"
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    groups:
+      actions:
+        patterns: ["*"]
+    commit-message:
+      prefix: "ci"

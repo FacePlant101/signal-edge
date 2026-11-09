@@ -8,6 +8,7 @@
 // the same inner message, which decrypts, and Signal's own roots reject that certificate.
 
 import type { SqlDatabase } from "../sql.js";
+import { refuseLinkedDatabase } from "./guard.js";
 import { fromBase64, toBase64 } from "../util/bytes.js";
 import type { Sealer } from "../util/sealer.js";
 import { IdentityLog, createIdentitySchema } from "../protocol/identities.js";
@@ -37,6 +38,7 @@ function pad(b: Uint8Array): Uint8Array {
 }
 
 export async function receiverSelfTest(db: SqlDatabase, sealer: Sealer) {
+	refuseLinkedDatabase(db);
 	const sig = signal();
 	createStoreSchema(db);
 	createMessageSchema(db);
@@ -90,6 +92,12 @@ export async function receiverSelfTest(db: SqlDatabase, sealer: Sealer) {
 		[10, sentAt + 50],
 	]);
 
+	// A PreKey message claiming to be from our own account must carry our own identity key (here Bob's
+	// is ours and the message carries Alice's): refused before anything is decrypted or stored.
+	const ownAccountPinned = await receiveEnvelope(envelope, { aci: ALICE, deviceId: 2 }, { aci: bob }, { aci: bobPair }, identities).then(
+		() => false,
+		(e) => /different identity key/.test(String(e)),
+	);
 	const r = await receiveEnvelope(envelope, { aci: BOB, deviceId: 1 }, { aci: bob }, { aci: bobPair }, identities);
 	if (r.status !== "decrypted") return { ok: false, result: r };
 
@@ -427,6 +435,7 @@ export async function receiverSelfTest(db: SqlDatabase, sealer: Sealer) {
 		sealedRejectedBySignalRoots: sealed.rejectedBySignalRoots,
 		sealedRetryRequest: sealed.retryRequest,
 		accessKeyKat,
+		ownAccountPinned,
 		attachmentRoundTrip,
 		pointerRoundTrip,
 		truncatesOnCharBoundary,

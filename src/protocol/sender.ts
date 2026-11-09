@@ -124,6 +124,8 @@ export type SendContext = {
 	onAccessKeyRefused?: (serviceId: string, accessKey: Uint8Array) => void;
 	/** Why a send to someone else went authenticated (for counters); not called for sends to ourselves. */
 	onUnsealed?: (serviceId: string, reason: "no access key" | "no certificate" | "no identity key") => void;
+	/** Aborts the send's requests (SignalClient.reset() uses it so a forgotten account's send stops). */
+	signal?: AbortSignal;
 };
 
 export type SendOptions = {
@@ -152,12 +154,12 @@ export async function fetchKeys(ctx: SendContext, serviceId: string, device: num
 	const local = () => new sig.WasmProtocolAddress(ctx.ourAci, ctx.ourDeviceId);
 	const path = `/v2/keys/${serviceId}/${device}`;
 	let refused: "refused" | undefined;
-	let res = accessKey ? await signalFetch(CHAT_HOST, "GET", path, { headers: { "Unidentified-Access-Key": toBase64(accessKey) } }) : undefined;
+	let res = accessKey ? await signalFetch(CHAT_HOST, "GET", path, { headers: { "Unidentified-Access-Key": toBase64(accessKey) }, signal: ctx.signal }) : undefined;
 	if (res && (res.status === 401 || res.status === 403)) {
 		refused = "refused";
 		res = undefined;
 	}
-	res ??= await signalFetch(CHAT_HOST, "GET", path, { headers: { Authorization: ctx.auth } });
+	res ??= await signalFetch(CHAT_HOST, "GET", path, { headers: { Authorization: ctx.auth }, signal: ctx.signal });
 	if (res.status === 404) return refused; // no such device (or account); the server's 409 will tell
 	if (res.status !== 200) throw new Error(`GET /v2/keys/${serviceId}/${device} failed: HTTP ${res.status}`);
 	const keys = JSON.parse(dec.decode(res.body)) as KeysResponse;
@@ -328,6 +330,7 @@ export async function sendToServiceId(ctx: SendContext, serviceId: string, conte
 			// Sealed: the access key instead of our credentials, so the server can't tell who sent it.
 			headers: sealed ? { "Unidentified-Access-Key": toBase64(opts.accessKey!) } : { Authorization: ctx.auth },
 			json: { messages, timestamp, online: false, urgent: opts.urgent ?? true },
+			signal: ctx.signal,
 		});
 		if (res.status === 200) {
 			if (sealed) (ctx.sealedTo ??= []).push(serviceId);

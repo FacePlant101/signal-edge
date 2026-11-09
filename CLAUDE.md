@@ -21,6 +21,12 @@ A Signal linked-device client library, Workers first, runtime-pluggable. Extract
 - No key material, account data or real phone numbers in tests or fixtures. Live tests only with a throwaway number.
 - AGPL-3.0-only (libsignal). Credits live in NOTICE and README "Credits"; after any `Cargo.lock` change, run `python3 scripts/third-party-licenses.py` and commit `THIRD_PARTY_LICENSES.txt` (it ships with the prebuilt WASM).
 
+## Security rules (from the review before 0.2.0)
+- Everything in a message is the sender's word: sizes in attachment pointers, quoted text, group context. Downloads are capped by bytes read (`downloadAttachment` `maxBytes`, `signalFetch` `maxBytes`); group records need the sender to be a member (`SignalClient.#dropNonMembers`); quotes are checked against stored messages.
+- Every network call has a deadline (`signalFetch` `timeoutMs`, TLS handshake, WebSocket upgrade); a call without one can hold the protocol lock forever.
+- Background work captures `#generation` and checks it (`#stillCurrent`) right before writing (no await in between); `reset()` bumps it. Stores and helpers are built on `#accountDb`, a view bound to the generation that refuses work once a reset has moved on (`AccountForgotten`); take them before the first network call. New background paths must do the same.
+- `tls/` has host tests (`cargo test --manifest-path tls/Cargo.toml --target x86_64-unknown-linux-gnu`), run by the WASM workflow; test/security.test.mjs covers the rest.
+
 ## Gotchas (from the original spike, still true)
 - wasm-bindgen objects may be consumed when passed by value: create a fresh `WasmProtocolAddress` per call.
 - Workers-only APIs (`crypto.subtle.timingSafeEqual`, …) don't belong in the core; use the helpers in `src/util/bytes.ts`. `npm test` runs the core in Node and catches them.

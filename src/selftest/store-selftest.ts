@@ -2,6 +2,7 @@
 // instance (never the real account): Bob's state lives in SQLite, Alice in memory.
 
 import type { SqlDatabase } from "../sql.js";
+import { refuseLinkedDatabase } from "./guard.js";
 import type { Sealer } from "../util/sealer.js";
 import { dec, enc, fromBase64 } from "../util/bytes.js";
 import { createStoreSchema, ProtocolStore } from "../protocol/store.js";
@@ -11,6 +12,7 @@ const BOB = "bob-aci";
 const ALICE = "alice-aci";
 
 export async function storeSelfTest(db: SqlDatabase, sealer: Sealer) {
+	refuseLinkedDatabase(db);
 	const sig = signal();
 	const addr = (name: string) => new sig.WasmProtocolAddress(name, 1);
 	createStoreSchema(db);

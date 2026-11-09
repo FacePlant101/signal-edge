@@ -5,3 +5,4 @@
 export { storeSelfTest } from "./store-selftest.js";
 export { receiverSelfTest } from "./receiver-selftest.js";
 export { linkCryptoSelfTest } from "./crypto-selftest.js";
+export { refuseLinkedDatabase } from "./guard.js";

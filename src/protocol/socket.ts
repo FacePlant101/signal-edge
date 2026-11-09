@@ -4,6 +4,8 @@ import { decodeWsMessage, encodeWsRequest, encodeWsResponse, type WsRequest, typ
 export const CHAT_HOST = "chat.signal.org";
 const KEEPALIVE_MS = 30_000;
 const REQUEST_TIMEOUT_MS = 30_000;
+/** Consecutive unanswered keepalives after which the connection counts as dead and is closed. */
+const KEEPALIVE_FAILURES = 2;
 
 export type SignalSocketHandlers = {
 	/** Server-initiated request; return the HTTP status to acknowledge with. */
@@ -22,20 +24,42 @@ export class SignalSocket {
 	#nextId = 1n;
 	#pending = new Map<bigint, { resolve: (r: WsResponse) => void; reject: (e: Error) => void }>();
 	#keepalive?: ReturnType<typeof setInterval>;
+	#closed = false;
+	/** Server requests being handled: the read loop waits for each, so responses can't be read meanwhile. */
+	#handling = 0;
+	/** When the last server request finished being handled. */
+	#handledAt = 0;
 
 	static async connect(path: string, handlers: SignalSocketHandlers, headers: Record<string, string> = {}): Promise<SignalSocket> {
 		const s = new SignalSocket();
-		s.#ws = await WsClient.connect(CHAT_HOST, path, headers, {
+		await WsClient.connect(CHAT_HOST, path, headers, {
+			// Set before any message is handled: the server's first request can arrive with the upgrade
+			// response, and answering it needs the socket.
+			onOpen: (ws) => (s.#ws = ws),
 			onMessage: (data) => s.#onMessage(data, handlers),
 			onClose: (code, reason) => {
+				s.#closed = true;
 				if (s.#keepalive) clearInterval(s.#keepalive);
 				for (const p of s.#pending.values()) p.reject(new Error(`socket closed: ${code} ${reason}`));
 				s.#pending.clear();
 				handlers.onClose(code, reason);
 			},
 		});
+		// A half-open connection never errors by itself: close it when keepalives go unanswered, so the
+		// owner sees onClose and reconnects.
+		let failures = 0;
+		if (s.#closed) return s; // closed while connecting: onClose has run, no keepalive to start
 		s.#keepalive = setInterval(() => {
-			s.request("GET", "/v1/keepalive").catch(() => {});
+			const sentAt = Date.now();
+			s.request("GET", "/v1/keepalive").then(
+				() => (failures = 0),
+				() => {
+					// A handler busy since the keepalive went out kept its answer from being read: this one
+					// proves nothing either way (earlier failures still count).
+					if (s.#handling || s.#handledAt >= sentAt) return;
+					if (++failures >= KEEPALIVE_FAILURES) void s.close().catch(() => {});
+				},
+			);
 		}, KEEPALIVE_MS);
 		return s;
 	}
@@ -75,9 +99,12 @@ export class SignalSocket {
 			this.#pending.delete(response.id);
 		} else if (request) {
 			let status = 500;
+			this.#handling++;
 			try {
 				status = await handlers.onRequest(request);
 			} finally {
+				this.#handling--;
+				this.#handledAt = Date.now();
 				await this.#ws.send(encodeWsResponse({ id: request.id, status, message: status === 200 ? "OK" : "Error", headers: [] }));
 			}
 		}

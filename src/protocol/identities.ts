@@ -61,11 +61,15 @@ export class IdentityLog {
 	}
 }
 
-/** The sender's identity key in a serialized PreKeySignalMessage: a version byte, then protobuf field 3. */
+/**
+ * The sender's identity key in a serialized PreKeySignalMessage: a version byte, then protobuf field 3.
+ * libsignal decodes the first 33 bytes (type 0x05 + key) and ignores anything after them, so that is
+ * the key checked here too: otherwise a key with bytes appended would skip the identity check.
+ */
 export function preKeyMessageIdentity(ciphertext: Uint8Array): Uint8Array | undefined {
 	try {
 		const key = new Decoded(ciphertext.subarray(1)).bytes(3);
-		return key?.length === 33 ? key : undefined;
+		return key && key.length >= 33 && key[0] === 0x05 ? key.slice(0, 33) : undefined;
 	} catch {
 		return undefined;
 	}

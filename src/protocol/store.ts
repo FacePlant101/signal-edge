@@ -8,6 +8,13 @@ import type { Sealer } from "../util/sealer.js";
 import { toBase64 } from "../util/bytes.js";
 import { signal } from "./wasm.js";
 
+/**
+ * Other people's sender keys kept per sending device (one per group it sends to us in, plus
+ * rotations); the least recently used go first. A message under a pruned key fails to decrypt, and
+ * the retry request that follows makes the sender share it again. Our own keys aren't capped.
+ */
+const MAX_SENDER_KEYS_PER_DEVICE = 256;
+
 /** Which of our two identities a store belongs to. */
 export type OurIdentity = "aci" | "pni";
 
@@ -155,12 +162,23 @@ export class ProtocolStore {
 		return out.sort((x, y) => x - y);
 	}
 
-	async saveSenderKey(name: string, device: number, distributionId: string): Promise<void> {
+	/** Saves a sender key after use; `ours`: our own sending key, never pruned (a lost one breaks our sends). */
+	async saveSenderKey(name: string, device: number, distributionId: string, ours = false): Promise<void> {
 		const key = `${name}.${device}`;
 		const record = await this.senderKeys.export_sender_key(address(name, device), distributionId);
 		if (!record) return;
 		const sealed = await this.#seal("sender_keys", `${key}|${distributionId}`, record);
 		this.db.exec("INSERT OR REPLACE INTO sender_keys (address, distribution_id, record, updated_at) VALUES (?, ?, ?, ?)", key, distributionId, sealed, Date.now());
+		if (ours) return;
+		// Anyone can send distribution messages with new ids: keep each device's most recently used ones
+		// only, in the database and in libsignal's in-memory store alike.
+		const pruned = this.db.exec<{ distribution_id: string }>(
+			"DELETE FROM sender_keys WHERE address = ? AND distribution_id NOT IN (SELECT distribution_id FROM sender_keys WHERE address = ? ORDER BY updated_at DESC, rowid DESC LIMIT ?) RETURNING distribution_id",
+			key,
+			key,
+			MAX_SENDER_KEYS_PER_DEVICE,
+		);
+		for (const r of pruned) await this.senderKeys.remove_sender_key(address(name, device), r.distribution_id);
 	}
 
 	async #sessionWrite(name: string, device: number): Promise<() => void> {

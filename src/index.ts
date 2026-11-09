@@ -6,6 +6,7 @@
 // The client
 export {
 	SignalClient,
+	AccountForgotten,
 	SIGNAL_TABLES,
 	type SignalClientOptions,
 	type LinkState,
@@ -40,6 +41,9 @@ export { sendToServiceId, dataMessage, contentWithData, contentWithSentTranscrip
 export {
 	decodeEnvelope,
 	parseContent,
+	keepGroups,
+	groupsNamed,
+	groupOf,
 	unpad,
 	extractMentions,
 	checkMentions,

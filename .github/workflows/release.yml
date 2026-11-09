@@ -1,32 +1,58 @@
 name: Release
-# Pushing a tag v<version> (matching package.json) publishes that version to npm.
+# Pushing a tag v<version> (matching package.json, on a commit that is on main) publishes that version.
+# verify builds and tests the tagged commit and packs it, with a read-only token and no OIDC token;
+# publish only uploads that tarball, running no scripts, with the npm environment's credentials.
 on:
   push:
     tags: ["v*"]
 permissions:
   contents: read
-  id-token: write # npm trusted publishing (OIDC) and provenance
 jobs:
-  publish:
+  verify:
     runs-on: ubuntu-latest
-    environment: npm
     steps:
       - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - name: The tag matches package.json and is on main
+        run: |
+          test "v$(node -p 'require("./package.json").version')" = "$GITHUB_REF_NAME"
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+      - run: npm ci --ignore-scripts
+      - run: npm run typecheck
+      - run: npm test
+        env:
+          SIGNAL_NETWORK_TESTS: "1"
+      - run: npm pack
+      - uses: actions/upload-artifact@v4
+        with:
+          name: package
+          path: signal-edge-*.tgz
+
+  publish:
+    needs: verify
+    runs-on: ubuntu-latest
+    environment: npm
+    permissions:
+      contents: read
+      id-token: write # npm trusted publishing (OIDC) and provenance
+    steps:
       - uses: actions/setup-node@v5
         with:
           # Node 24 ships npm 11, which trusted publishing needs.
           node-version: 24
           registry-url: https://registry.npmjs.org
-      - name: The tag matches package.json
-        run: test "v$(node -p 'require("./package.json").version')" = "$GITHUB_REF_NAME"
-      - run: npm ci
-      # prepublishOnly runs typecheck and tests (with the network tests here too).
+      - uses: actions/download-artifact@v4
+        with:
+          name: package
       # With a trusted publisher configured on npmjs.com, npm signs in through OIDC. NPM_TOKEN (a granular
       # token) is only for publishing before that is set up, e.g. the very first release.
       - name: Publish
         env:
-          SIGNAL_NETWORK_TESTS: "1"
           NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           if [ -n "$NPM_TOKEN" ]; then export NODE_AUTH_TOKEN="$NPM_TOKEN"; fi
-          npm publish
+          npm publish ./signal-edge-*.tgz --provenance --access public --ignore-scripts

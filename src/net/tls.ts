@@ -1,5 +1,9 @@
 import { hostConnect, wasmModule, type RawSocket } from "../runtime.js";
 import { TlsClient, initSync } from "../vendor/signal-tls/signal_tls.js";
+import { withDeadline } from "../util/deadline.js";
+
+/** Deadline for TCP connect plus the TLS handshake. */
+const HANDSHAKE_TIMEOUT_MS = 15_000;
 
 let ready = false;
 function initTls(): void {
@@ -34,6 +38,13 @@ export class TlsSocket {
 					return;
 				}
 				for (;;) {
+					// After the peer's close_notify rustls takes no more input (feeding it more would spin):
+					// the stream ends here, whatever else arrives. After close() the TLS state is freed:
+					// #closed is checked before every use of it that follows an await.
+					if (this.#closed || this.#tls.peer_closed) {
+						controller.close();
+						return;
+					}
 					const { value, done } = await reader.read();
 					if (done || this.#closed) {
 						controller.close();
@@ -45,7 +56,7 @@ export class TlsSocket {
 						controller.enqueue(plaintext);
 						return;
 					}
-					if (this.#tls.peer_closed) {
+					if (this.#closed || this.#tls.peer_closed) {
 						controller.close();
 						return;
 					}
@@ -55,10 +66,32 @@ export class TlsSocket {
 		});
 	}
 
-	static async connect(hostname: string, port = 443): Promise<TlsSocket> {
+	static async connect(hostname: string, port = 443, timeoutMs = HANDSHAKE_TIMEOUT_MS): Promise<TlsSocket> {
 		initTls();
-		const socket = await hostConnect()(hostname, port);
-		await socket.opened;
+		let raw: RawSocket | undefined;
+		let stopped = false;
+		return withDeadline(
+			async () => {
+				const socket = await hostConnect()(hostname, port);
+				raw = socket;
+				if (stopped) {
+					await socket.close().catch(() => {});
+					throw new Error(`TLS: connect to ${hostname} stopped`);
+				}
+				await socket.opened;
+				return TlsSocket.#handshake(hostname, socket);
+			},
+			timeoutMs,
+			undefined,
+			`TLS: connect to ${hostname}`,
+			() => {
+				stopped = true;
+				void raw?.close().catch(() => {});
+			},
+		);
+	}
+
+	static async #handshake(hostname: string, socket: RawSocket): Promise<TlsSocket> {
 		const tls = new TlsClient(hostname);
 		const writer = socket.writable.getWriter();
 		const reader = socket.readable.getReader();
@@ -103,11 +136,16 @@ export class TlsSocket {
 	async close(): Promise<void> {
 		if (this.#closed) return;
 		this.#closed = true;
+		// close_notify, best effort: it queues behind earlier writes, and a stalled one (a peer that stopped
+		// reading) mustn't keep the connection open. Closing the raw socket ends such writes too.
+		let timer: ReturnType<typeof setTimeout> | undefined;
 		try {
 			this.#tls.close();
-			await this.#flush();
+			await Promise.race([this.#flush(), new Promise((r) => (timer = setTimeout(r, CLOSE_NOTIFY_WAIT_MS)))]);
 		} catch {
-			// Best effort: the peer may already be gone.
+			// The peer may already be gone.
+		} finally {
+			if (timer !== undefined) clearTimeout(timer);
 		}
 		this.#tls.free();
 		await this.#socket.close().catch(() => {});
@@ -137,6 +175,8 @@ export class TlsSocket {
 // On the deployed edge a single socket write above 64 KiB drops the connection ("Network
 // connection lost"); local workerd doesn't. Write at most one TLS record's worth at a time.
 const MAX_SOCKET_WRITE = 16 * 1024;
+/** close() waits at most this long for close_notify to go out. */
+const CLOSE_NOTIFY_WAIT_MS = 1_000;
 
 async function write(writer: WritableStreamDefaultWriter<Uint8Array>, bytes: Uint8Array): Promise<void> {
 	for (let off = 0; off < bytes.length; off += MAX_SOCKET_WRITE) {

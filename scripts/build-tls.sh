@@ -21,7 +21,7 @@ remap=(--remap-path-prefix="$HOME/.cargo=/cargo" --remap-path-prefix="$PWD=/sign
 export CFLAGS_wasm32_unknown_unknown="-ffile-prefix-map=$HOME/.cargo=/cargo -ffile-prefix-map=$PWD=/signal-edge"
 encode() { local IFS=$'\x1f'; echo "$*"; }
 CARGO_ENCODED_RUSTFLAGS="$(encode "${remap[@]}")" \
-  cargo build --manifest-path tls/Cargo.toml --release --target wasm32-unknown-unknown
+  cargo build --locked --manifest-path tls/Cargo.toml --release --target wasm32-unknown-unknown
 wasm-bindgen --target web --out-dir src/vendor/signal-tls \
   tls/target/wasm32-unknown-unknown/release/signal_tls.wasm
 ls -l src/vendor/signal-tls

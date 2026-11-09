@@ -4,6 +4,7 @@
 import { toBase64 } from "../util/bytes.js";
 import { cdnIdFromFixed64, type AttachmentPointer } from "./attachments.js";
 import { Decoded } from "./proto.js";
+import type { TimerSeen } from "./timers.js";
 import { signal } from "./wasm.js";
 
 export const ENVELOPE = { DOUBLE_RATCHET: 1, PREKEY_MESSAGE: 3, SERVER_DELIVERY_RECEIPT: 5, UNIDENTIFIED_SENDER: 6, PLAINTEXT_CONTENT: 8 } as const;
@@ -89,11 +90,99 @@ export type MessageRecord = {
 	sentAt: number; // DataMessage timestamp, the id other messages refer to
 	body?: string;
 	attachments?: Attachment[];
-	quote?: { id?: number; author?: string; text?: string };
+	quote?: { id?: number; author?: string; text?: string; mentions?: Mention[] };
+	/** @mentions: each replaces a placeholder (U+FFFC) in the body; indices in UTF-16 code units. */
+	mentions?: Mention[];
 	reaction?: { emoji?: string; remove: boolean; targetAuthor?: string; targetSentAt?: number };
 	targetSentAt?: number; // edits and deletes
 	expireTimer?: number;
 };
+
+export type Mention = { start: number; length: number; aci: string };
+
+const UUID = "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}";
+/** A lowercase ACI (UUID). */
+export const ACI_PATTERN = new RegExp(`^${UUID}$`);
+const MENTION_TOKEN = new RegExp(`@\\[aci:(${UUID})\\]`, "gi");
+
+/** The placeholder a mention stands on in the body (Signal's apps draw the name over it). */
+export const MENTION_PLACEHOLDER = "\uFFFC";
+
+/** BodyRange { start 1, length 2, mentionAci 3 | style 4 | mentionAciBinary 5 }: the mentions; text styles are dropped. */
+export function parseMentions(ranges: unknown[] | undefined): Mention[] {
+	const out: Mention[] = [];
+	for (const buf of ranges ?? []) {
+		if (!(buf instanceof Uint8Array)) continue;
+		let r: Decoded;
+		try {
+			r = new Decoded(buf);
+		} catch {
+			continue; // a malformed range (text styles included) mustn't cost the whole message
+		}
+		const aci = (r.string(3) || serviceIdFromBinary(r.bytes(5)))?.toLowerCase();
+		// Only ACIs can be mentioned; anything else (a PNI, junk) would show up, and be quoted back, as is.
+		if (aci && ACI_PATTERN.test(aci)) out.push({ start: r.uint(1) ?? 0, length: r.uint(2) ?? 0, aci });
+	}
+	return out;
+}
+
+/**
+ * The mentions that apply to `body`, in text order. A range past the text, or overlapping one already
+ * kept, is dropped, and so is one that doesn't cover exactly the placeholder (real clients always put
+ * a mention there; a range over ordinary words would only make text look addressed).
+ */
+export function validMentions(body: string, mentions: Mention[] | undefined): Mention[] {
+	const out: Mention[] = [];
+	let pos = 0;
+	for (const m of [...(mentions ?? [])].sort((a, b) => a.start - b.start)) {
+		if (m.start < pos || body.slice(m.start, m.start + m.length) !== MENTION_PLACEHOLDER) continue;
+		out.push(m);
+		pos = m.start + m.length;
+	}
+	return out;
+}
+
+/** The body with each mention's placeholder written as "@" + label(aci). */
+export function showMentions(body: string, mentions: Mention[] | undefined, label: (aci: string) => string): string {
+	let out = "";
+	let pos = 0;
+	for (const m of validMentions(body, mentions)) {
+		out += body.slice(pos, m.start) + `@${label(m.aci)}`;
+		pos = m.start + m.length;
+	}
+	return out + body.slice(pos);
+}
+
+/** Text with any literal "@[aci:<uuid>]" token written as "@(aci:<uuid>)", so echoing it into send_message mentions nobody. */
+export function defuseMentionTokens(text: string): string {
+	return text.replace(MENTION_TOKEN, "@(aci:$1)");
+}
+
+/**
+ * Refuses mentions Signal's apps wouldn't send: any outside a group (`members` undefined: they offer
+ * mentions only in groups, and a 1:1 client may show a bare placeholder box), and any of a non-member.
+ */
+export function checkMentions(mentions: Mention[], members: string[] | undefined): void {
+	if (!mentions.length) return;
+	if (!members) throw new Error("@mentions work only in group chats");
+	const inGroup = new Set(members);
+	const strangers = [...new Set(mentions.map((m) => m.aci).filter((aci) => !inGroup.has(aci)))];
+	if (strangers.length) throw new Error(`not a member of this group, so can't be @mentioned: ${strangers.map((aci) => `aci:${aci}`).join(", ")}`);
+}
+
+/** Text an MCP client wrote with "@[aci:<uuid>]" tokens → the body with placeholders, and the mentions. */
+export function extractMentions(text: string): { body: string; mentions: Mention[] } {
+	const mentions: Mention[] = [];
+	let body = "";
+	let last = 0;
+	for (const match of text.matchAll(MENTION_TOKEN)) {
+		body += text.slice(last, match.index);
+		mentions.push({ start: body.length, length: MENTION_PLACEHOLDER.length, aci: match[1]!.toLowerCase() });
+		body += MENTION_PLACEHOLDER;
+		last = match.index! + match[0].length;
+	}
+	return { body: body + text.slice(last), mentions };
+}
 
 export type ParsedContent = {
 	records: MessageRecord[];
@@ -104,6 +193,8 @@ export type ParsedContent = {
 	kinds: string[];
 	/** GroupContextV2 of group messages seen (master key and revision), to keep the group directory current. */
 	groups: GroupContext[];
+	/** Disappearing-message timers seen in plain messages and timer updates (src/signal/timers.ts). */
+	timers: TimerSeen[];
 };
 
 export type GroupContext = { masterKey: Uint8Array; revision: number };
@@ -114,12 +205,12 @@ export type GroupContext = { masterKey: Uint8Array; revision: number };
  */
 export function parseContent(plaintext: Uint8Array, sender: string, senderDevice: number, ourAci: string, sealedGroupId?: Uint8Array): ParsedContent {
 	const c = new Decoded(plaintext);
-	const out: ParsedContent = { records: [], senderKeyDistribution: c.bytes(7), decryptionError: c.bytes(8), kinds: [], groups: [] };
+	const out: ParsedContent = { records: [], senderKeyDistribution: c.bytes(7), decryptionError: c.bytes(8), kinds: [], groups: [], timers: [] };
 
 	const data = c.bytes(1);
 	if (data) {
 		out.kinds.push("data");
-		const rec = dataMessage(data, sender, senderDevice, false, `aci:${sender}`, sealedGroupId, out.groups);
+		const rec = dataMessage(data, sender, senderDevice, false, `aci:${sender}`, sealedGroupId, out.groups, out.timers);
 		if (rec) out.records.push(rec);
 		// Field numbers only (no content), so "data arrived but nothing stored" can be told apart.
 		else out.kinds.push(`data-empty:${[...new Decoded(data).fields.keys()].sort((a, b) => a - b).join(",")}`);
@@ -137,7 +228,7 @@ export function parseContent(plaintext: Uint8Array, sender: string, senderDevice
 			const destConv = dest ? (dest.startsWith("PNI:") ? `pni:${dest.slice(4)}` : dest.startsWith("+") ? `e164:${dest}` : `aci:${dest}`) : "unknown";
 			const msg = t.bytes(3);
 			if (msg) {
-				const rec = dataMessage(msg, sender, senderDevice, true, destConv, undefined, out.groups);
+				const rec = dataMessage(msg, sender, senderDevice, true, destConv, undefined, out.groups, out.timers);
 				if (rec) out.records.push(rec);
 			}
 			const edit = t.bytes(10);
@@ -180,6 +271,7 @@ function dataMessage(
 	conversation: string,
 	sealedGroupId?: Uint8Array,
 	groups?: GroupContext[],
+	timers?: TimerSeen[],
 ): MessageRecord | undefined {
 	const d = new Decoded(buf);
 	const groupContext = d.bytes(15) && new Decoded(d.bytes(15)!);
@@ -204,7 +296,11 @@ function dataMessage(
 	if (quote) {
 		const q = new Decoded(quote);
 		rec.quote = { id: q.uint(1), author: q.string(5) ?? serviceIdFromBinary(q.bytes(8)), text: q.string(3) };
+		const quoted = parseMentions(q.fields.get(6));
+		if (quoted.length) rec.quote.mentions = quoted;
 	}
+	const mentions = parseMentions(d.fields.get(18));
+	if (mentions.length) rec.mentions = mentions;
 
 	const reaction = d.bytes(16);
 	if (reaction) {
@@ -219,8 +315,15 @@ function dataMessage(
 		rec.targetSentAt = new Decoded(del).uint(1);
 	}
 
+	// Plain messages and timer updates (flags EXPIRATION_TIMER_UPDATE = 2) set the chat's timer, as in
+	// Desktop handleDataMessage; reactions, deletes and profile-key updates don't.
+	const shown = rec.kind !== "message" || rec.body !== undefined || !!rec.attachments || !!rec.quote;
+	const timerUpdate = ((d.uint(4) ?? 0) & 2) === 2;
+	// Stickers (11), shared contacts (9), payments (20) and gift badges (22) are messages too, though not shown here.
+	const otherMessage = [9, 11, 20, 22].some((f) => d.fields.has(f));
+	if (timers && (timerUpdate || (rec.kind === "message" && (shown || otherMessage)))) timers.push({ conversation: rec.conversation, expireTimer: d.uint(5) ?? 0, version: d.uint(23) });
 	// Profile-key updates, expiration-timer changes etc. carry nothing to show.
-	if (rec.kind === "message" && rec.body === undefined && !rec.attachments && !rec.quote) return undefined;
+	if (!shown) return undefined;
 	return rec;
 }
 

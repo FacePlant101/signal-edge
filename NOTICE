@@ -1,0 +1,43 @@
+signal-edge
+Copyright (C) 2026 FacePlant101 and the signal-edge contributors
+
+This program is free software: you can redistribute it and/or modify it under the terms of the GNU
+Affero General Public License, version 3 only, as published by the Free Software Foundation. It is
+distributed WITHOUT ANY WARRANTY; see LICENSE for the full text.
+
+
+SIGNAL MESSENGER, LLC
+
+signal-edge implements the Signal protocol and Signal's service APIs by following, and in places
+porting, Signal's own AGPL-3.0-only software. Copyright Signal Messenger, LLC.
+
+- Signal-Desktop (https://github.com/signalapp/Signal-Desktop): device linking and provisioning,
+  account and prekey management, the receive loop, sending (padding, device-list repair, sync
+  transcripts, sender keys, sealed sender), retry requests, the storage service, groups, attachments,
+  timers, mentions, quotes and reactions. Source files name the Desktop functions they follow. The
+  sealed-sender trust roots and the zkgroup server public parameters are from its
+  config/production.json.
+- libsignal (https://github.com/signalapp/libsignal): sealed/ is built on its libsignal-protocol,
+  zkgroup, libsignal-core and libsignal-account-keys crates (tag v0.106.1), so the prebuilt
+  src/vendor/signal-sealed WebAssembly contains them. tls/res/ holds Signal's two root certificates
+  from its rust/net/res/. Wire formats follow its protobuf definitions and its chat client.
+- Signal-Android (https://github.com/signalapp/Signal-Android): referenced for how the apps treat
+  disappearing-message timers.
+
+"Signal" is a trademark of Signal Messenger, LLC. signal-edge is an independent, unofficial project.
+It is not affiliated with, sponsored by or endorsed by Signal Messenger, LLC.
+
+
+SIGNAL-WASM
+
+@getmaapp/signal-wasm (https://github.com/getmaapp/signal-wasm), AGPL-3.0-only: libsignal compiled
+to WebAssembly, providing sessions, the Double Ratchet, prekeys and sender keys. It is a dependency
+installed from npm, not copied into this repository.
+
+
+RUST CRATES IN THE PREBUILT WEBASSEMBLY
+
+src/vendor/signal-tls and src/vendor/signal-sealed are compiled together with third-party crates,
+among them rustls and ring (TLS), wasm-bindgen and js-sys (JavaScript bindings), the RustCrypto
+crates, curve25519-dalek, libcrux (Cryspen) and hpke-rs. THIRD_PARTY_LICENSES.txt lists every crate
+with its license and the license files it ships.

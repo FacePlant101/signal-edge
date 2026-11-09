@@ -2,7 +2,7 @@ import { signalFetch } from "./net/http.js";
 import { decryptProvisionEnvelope, encryptDeviceName, newProvisioningKeyPair } from "./protocol/crypto.js";
 import { decodeProvisioningAddress, type ProvisionMessage } from "./protocol/proto.js";
 import { CHAT_HOST, SignalSocket } from "./protocol/socket.js";
-import { createMessageSchema, MessageStore, type StoredMessage } from "./protocol/messages.js";
+import { createMessageSchema, MessageStore, type Conversation, type StoredMessage } from "./protocol/messages.js";
 import {
 	createDirectorySchema,
 	credentialForToday,
@@ -19,11 +19,13 @@ import { accessKey, CONTENT_HINT, libsignalExtra } from "./protocol/sealed.js";
 import { readStorage } from "./protocol/storage-service.js";
 import type { WsRequest } from "./protocol/proto.js";
 import { receiveEnvelope, type Self } from "./protocol/receiver.js";
-import { contentWithData, contentWithSentTranscript, dataMessage, sendToServiceId, type SendContext } from "./protocol/sender.js";
+import { contentWithData, contentWithSentTranscript, dataMessage, quoteMessage, reactionMessage, sendToServiceId, type SendContext } from "./protocol/sender.js";
 import { createStoreSchema, ProtocolStore, type OurIdentity, type UploadPreKey, type UploadSignedPreKey } from "./protocol/store.js";
 import { signal } from "./protocol/wasm.js";
 import { createIdentitySchema, IdentityLog } from "./protocol/identities.js";
-import { decodeEnvelope, type MessageRecord } from "./protocol/content.js";
+import { ChatTimers, createTimerSchema, type Expiry } from "./protocol/timers.js";
+import { createSenderKeySchema, SenderKeyShares, senderKeyUsable, sendWithSenderKey } from "./protocol/sender-keys.js";
+import { ACI_PATTERN, checkMentions, decodeEnvelope, extractMentions, validMentions, type Attachment, type Mention, type MessageRecord } from "./protocol/content.js";
 import {
 	createRetrySchema,
 	decryptionErrorFor,
@@ -39,9 +41,9 @@ import {
 	sendLogCount,
 	type FailedMessage,
 } from "./protocol/retry.js";
-import { downloadAttachment } from "./protocol/attachments.js";
-import type { SqlDatabase } from "./sql.js";
-import { blob } from "./sql.js";
+import { attachmentPointer, downloadAttachment, expandLongText, LONG_TEXT_TYPE, truncateUtf8, uploadAttachment } from "./protocol/attachments.js";
+import { Counters, createCounterSchema, type LastError, type LastingCounter } from "./counters.js";
+import { blob, type SqlDatabase } from "./sql.js";
 import { dec, enc, fromBase64, randomBytes, toBase64 } from "./util/bytes.js";
 import { Sealer } from "./util/sealer.js";
 
@@ -91,10 +93,15 @@ const PRE_KEY_MAX_COUNT = 200;
 const ROTATION_AGE_MS = 1.5 * 24 * 3600 * 1000;
 const REFRESH_INTERVAL_MS = 24 * 3600 * 1000;
 const REFRESH_RETRY_MS = 10 * 60 * 1000;
-/** Desktop sends longer text as an attachment (long-text), which we can't upload yet. */
+/** Text beyond this goes out as a long-text attachment, as Desktop does (its limit is 2 KiB). */
 const MAX_TEXT_BYTES = 2000;
-/** Default limit for attachment downloads. */
-const MAX_ATTACHMENT_BYTES = 25_000_000;
+/** Desktop MAX_BODY_ATTACHMENT_BYTE_LENGTH: the longest text a long-text attachment may hold. */
+const MAX_LONG_TEXT_BYTES = 64 * 1024;
+const MAX_SEND_FILES = 5;
+/** How long a received message waits for its long-text attachment before it is stored without it. */
+const LONG_TEXT_TIMEOUT_MS = 8_000;
+/** Default for SignalClientOptions.maxAttachmentBytes. */
+const DEFAULT_MAX_ATTACHMENT_BYTES = 25_000_000;
 
 /** The alarm doubles as a watchdog: it reconnects the chat socket if it dropped. */
 const WATCHDOG_MS = 60_000;
@@ -115,10 +122,14 @@ export type DirectorySync = { storageVersion: number; contacts: number; groups: 
 /** A chat for list views: stored conversations plus known groups, with display names. */
 export type Chat = { chat: string; name: string; kind: "direct" | "group" | "self"; messages: number; lastSentAt?: number; lastAuthor?: string; note?: string };
 /** Group details without the master key. */
-export type GroupInfo = Omit<GroupRecord, "masterKey" | "members"> & { members?: { aci: string; name?: string; admin: boolean }[] };
+export type GroupInfo = Omit<GroupRecord, "masterKey" | "members" | "endorsements"> & { members?: { aci: string; name?: string; admin: boolean }[] };
 
 export type DirectSendResult = {
 	timestamp: number;
+	/** Files sent (besides a long-text attachment). */
+	attachments?: number;
+	/** The text went as a long-text attachment; the body holds its start. */
+	longText?: boolean;
 	/** The recipient's devices that got it (absent for Note to Self). */
 	recipientDevices?: number[];
 	sealedSender?: boolean;
@@ -134,8 +145,10 @@ export type GroupSendResult = {
 	timestamp: number;
 	members: number;
 	delivered: number;
-	/** How many of the delivered copies went sealed sender. */
+	/** How many of the delivered copies went sealed sender (sender key or per member). */
 	sealedSender: number;
+	/** The sender-key attempt, when the group's endorsements allowed one. */
+	senderKey?: { delivered: number; sharedWith: number; error?: string };
 	failed: { aci: string; error: string }[];
 	syncedDevices?: number[];
 	syncError?: string;
@@ -167,8 +180,10 @@ export type SignalClientOptions = {
 	db: SqlDatabase;
 	/** 32 random bytes, base64: AES-256-GCM key for everything the client stores. */
 	storageKey: string | undefined;
-	/** Shown in the phone's list of linked devices. */
+	/** Shown in the phone's list of linked devices (set when linking). */
 	deviceName?: string;
+	/** Largest attachment downloaded or sent (default 25 MB). */
+	maxAttachmentBytes?: number;
 	/** Keeps background work alive after the current request (Workers: `ctx.waitUntil`). */
 	waitUntil?: (p: Promise<unknown>) => void;
 	/**
@@ -196,14 +211,19 @@ export const SIGNAL_TABLES = [
 	"contacts",
 	"send_log",
 	"seen_envelopes",
+	"chat_timers",
+	"sender_key_shares",
+	"counters",
+	"last_errors",
 	"identities",
 ] as const;
 
 /**
- * One Signal account, acting as a linked device: linking, the receive loop, sending (1:1, groups,
- * sealed sender), contacts and groups, attachments, retry requests and key maintenance. State lives in
- * `db`, sealed with `storageKey`. Keep one instance per account and database (in Workers, inside one
- * Durable Object) and call `maintain()` when asked to through `scheduleMaintenance`.
+ * One Signal account, acting as a linked device: linking, the receive loop, sending (1:1 and groups,
+ * sealed sender and sender keys, attachments, quotes, reactions, mentions), contacts and groups,
+ * retry requests and key maintenance. State lives in `db`, sealed with `storageKey`. Keep one instance
+ * per account and database (in Workers, inside one Durable Object) and call `maintain()` when asked to
+ * through `scheduleMaintenance`.
  */
 export class SignalClient {
 	readonly #db: SqlDatabase;
@@ -220,6 +240,7 @@ export class SignalClient {
 	#receive: ReceiveState = { connected: false, envelopes: 0, stored: 0, ignored: 0, failed: 0, kinds: {} };
 	#syncing?: Promise<DirectorySync>;
 	#groupRefreshes = new Map<string, Promise<GroupRecord>>();
+	#timers?: ChatTimers;
 	#retryLimits = new Limiter();
 	/** Access keys (base64) the server refused, per ACI: sends to them stay authenticated until the key changes. */
 	#refusedAccessKeys = new Map<string, Set<string>>();
@@ -250,6 +271,9 @@ export class SignalClient {
 		createMessageSchema(this.#db);
 		createDirectorySchema(this.#db);
 		createRetrySchema(this.#db);
+		createTimerSchema(this.#db);
+		createSenderKeySchema(this.#db);
+		createCounterSchema(this.#db);
 		createIdentitySchema(this.#db);
 	}
 
@@ -322,6 +346,7 @@ export class SignalClient {
 			for (const t of SIGNAL_TABLES) this.#db.exec(`DELETE FROM ${t}`);
 		});
 		this.#createSchema();
+		this.#timers = undefined;
 		this.#stores = undefined;
 		this.#refusedAccessKeys.clear();
 		this.#senderCertificate = undefined;
@@ -366,17 +391,18 @@ export class SignalClient {
 
 	// --- receiving ---
 
-	receiveStatus(): ReceiveState & { failedStored: number; messages: number; sendLog: number } {
+	receiveStatus(): ReceiveState & { failedStored: number; messages: number; sendLog: number; lasting: { counters: Record<string, LastingCounter>; errors: Record<string, LastError> } } {
 		const failedStored = this.#db.exec<{ n: number }>("SELECT COUNT(*) AS n FROM failed_envelopes")[0]?.n ?? 0;
 		const messages = this.#db.exec<{ n: number }>("SELECT COUNT(*) AS n FROM messages")[0]?.n ?? 0;
-		return { ...this.#receive, failedStored, messages, sendLog: sendLogCount(this.#db) };
+		const c = this.#counters();
+		return { ...this.#receive, failedStored, messages, sendLog: sendLogCount(this.#db), lasting: { counters: c.counters(), errors: c.errors() } };
 	}
 
 	async messages(limit = 20, conversation?: string): Promise<StoredMessage[]> {
 		return (await this.messageStore()).latest(Math.min(Math.max(limit, 1), 200), conversation);
 	}
 
-	async conversations(): Promise<ReturnType<MessageStore["conversations"]>> {
+	async conversations(): Promise<Conversation[]> {
 		return (await this.messageStore()).conversations();
 	}
 
@@ -425,6 +451,7 @@ export class SignalClient {
 				this.#receive.connectedAt = Date.now();
 			} catch (e) {
 				this.#receive.lastError = `${new Date().toISOString()} connect: ${e}`;
+				this.#counters().error("connect", String(e));
 				// 401/403 on the upgrade: the device was removed or the password is wrong. Retrying won't help.
 				if (/HTTP 40[13]\b/.test(String(e))) this.#receive.authFailed = true;
 				throw e;
@@ -449,6 +476,7 @@ export class SignalClient {
 
 		const body = req.body ?? new Uint8Array(0);
 		this.#receive.envelopes++;
+		this.#counters().bump("receive:envelopes");
 		this.#receive.lastEnvelopeAt = Date.now();
 		// A redelivered envelope (e.g. the instance restarted before the ack) can't decrypt again: skip it.
 		const seen = new SeenEnvelopes(this.#db);
@@ -490,7 +518,11 @@ export class SignalClient {
 					await messages.add([identityChangeRecord(r.sender, r.senderDevice)], r.serverGuid, Date.now());
 				}
 				const added = await messages.add(r.parsed.records, r.serverGuid, Date.now());
+				// Stored first (the envelope already counts as seen, so a restart mid-download mustn't lose
+				// it), then a long message's full text replaces the short body.
+				await this.#expandLongText(r.parsed.records, messages);
 				this.#receive.stored += added;
+				this.#counters().bump("receive:stored", added);
 				if (r.parsed.decryptionError) {
 					const request = r.parsed.decryptionError;
 					void this.#answerRetryRequest(r.sender, r.senderDevice, request, stores, identities, messages).catch((e) => this.#retryError("answering retry request", e));
@@ -499,6 +531,7 @@ export class SignalClient {
 				if (added) this.#notifyMessages(r.parsed.records, self);
 				// Outside the protocol lock: fetching group state is network-only.
 				for (const g of r.parsed.groups) void this.#noteGroup(g.masterKey, g.revision).catch((e) => console.error("group refresh failed", e));
+				for (const t of r.parsed.timers) if (this.#chatTimers().apply(t)) this.#count("timer:updated");
 			}
 		} catch (e) {
 			// Ack anyway, or Signal redelivers it forever; keep it sealed so it can be reprocessed after a fix,
@@ -508,7 +541,9 @@ export class SignalClient {
 				void this.#requestResend(failed, stores, identities, messages).catch((err) => this.#retryError("sending retry request", err));
 			}
 			this.#receive.failed++;
+			this.#counters().bump("receive:failed");
 			this.#receive.lastError = `${new Date().toISOString()} envelope: ${e}`;
+			this.#counters().error("envelope", String(e));
 			console.error("envelope failed", e);
 			const sealed = await (await this.#sealer()).seal("failed_envelopes", body);
 			this.#db.exec("INSERT INTO failed_envelopes (received_at, error, envelope) VALUES (?, ?, ?)", Date.now(), String(e).slice(0, 500), sealed);
@@ -578,6 +613,10 @@ export class SignalClient {
 		const requesterKey = requester !== a.aci && (content || req.ratchetKey) ? await this.#accessKey(requester) : undefined;
 		const sealedSender = requesterKey && (await this.#sealedSender(a));
 		await this.#withProtocolLock(async () => {
+			// No ratchet key: a sender-key message failed, so that device lacks our sender key. The next group
+			// send shares it again (Desktop removes the device from the group's sender-key members). Inside
+			// the lock, so a group send in progress can't write its older device list back over this.
+			if (!req.ratchetKey) this.#senderKeyShares().forgetDevice(requester, requesterDevice);
 			const sig = signal();
 			const store = stores.aci!;
 			let archived = false;
@@ -607,7 +646,21 @@ export class SignalClient {
 	#retryError(what: string, e: unknown): void {
 		this.#count("retry-request:failed");
 		this.#receive.lastRetryError = `${new Date().toISOString()} ${what}: ${e}`;
+		this.#counters().error("retry request", `${what}: ${e}`);
 		console.error(what, e);
+	}
+
+	/** Counts and last errors kept across restarts (src/counters.ts). */
+	#counters(): Counters {
+		return new Counters(this.#db);
+	}
+
+	#senderKeyShares(): SenderKeyShares {
+		return new SenderKeyShares(this.#db);
+	}
+
+	#chatTimers(): ChatTimers {
+		return (this.#timers ??= new ChatTimers(this.#db));
 	}
 
 	/**
@@ -621,24 +674,32 @@ export class SignalClient {
 		await this.#withProtocolLock(async () => {
 			const timestamp = Date.now();
 			const ctx = sendContext(a, stores, identities);
-			await sendToServiceId(ctx, a.aci, contentWithSentTranscript(a.aci, timestamp, dataMessage(body, timestamp), []), timestamp);
+			// Note to Self's own timer, or the phone would read the code as turning it off.
+			const expiry = this.#chatTimers().forSend(`aci:${a.aci}`);
+			await sendToServiceId(ctx, a.aci, contentWithSentTranscript(a.aci, timestamp, dataMessage(body, timestamp, undefined, undefined, [], expiry), []), timestamp);
 		});
 	}
 
 	// --- sending ---
 
 	/**
-	 * Sends a text message to `aci:<uuid>` (or a bare UUID), `"self"` (Note to Self) or `group:<base64 id>`,
-	 * plus the sync transcript that makes it
-	 * appear on our other devices. For Note to Self the transcript is the only copy, as in Desktop.
+	 * Sends a message to `aci:<uuid>` (or a bare UUID), `"self"` (Note to Self) or `group:<base64 id>`,
+	 * plus the sync transcript that makes it appear on our other devices (for Note to Self the only
+	 * copy, as in Desktop). Text past 2000 bytes goes as a long-text attachment; `files` are uploaded
+	 * first; `extras` quote or react to a stored message by its sentAt. "@[aci:<uuid>]" in group text
+	 * becomes a mention.
 	 */
-	async sendText(to: string, body: string): Promise<DirectSendResult | GroupSendResult> {
-		if (!body.trim()) throw new Error("empty message");
-		if (new TextEncoder().encode(body).length > MAX_TEXT_BYTES) throw new Error(`message longer than ${MAX_TEXT_BYTES} bytes (long text needs an attachment)`);
-		if (to.startsWith("group:")) return this.#sendGroupText(to.slice(6), body);
+	async sendText(to: string, body: string, files: OutgoingFile[] = [], extras: MessageExtras = {}): Promise<DirectSendResult | GroupSendResult> {
+		if (extras.reaction && (body.trim() || files.length || extras.replyTo !== undefined)) throw new Error("a reaction is sent on its own, without text, attachments or a reply");
+		if (!body.trim() && !files.length && !extras.reaction) throw new Error("empty message");
 		const a = await this.#loadSecrets();
+		// Uploads happen before any lock (network only), and only once the target checks out: the same
+		// pointers go to every recipient.
+		const prepare = (conversation: string, members?: string[]) => this.#prepareOutgoing(a, body, files, extras, conversation, members);
+		if (to.startsWith("group:")) return this.#sendGroupText(to.slice(6), prepare, extractMentions(body).mentions.map((m) => m.aci));
 		const target = to === "self" ? a.aci : to.replace(/^aci:/, "").toLowerCase();
-		if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(target)) throw new Error("recipient must be an ACI (UUID) or \"self\"");
+		if (!ACI_PATTERN.test(target)) throw new Error("recipient must be an ACI (UUID) or \"self\"");
+		const out = await prepare(`aci:${target}`);
 		const stores = await this.#loadStores();
 		const messages = await this.messageStore();
 		const identities = await this.#identities();
@@ -650,7 +711,12 @@ export class SignalClient {
 			const timestamp = Date.now();
 			const ctx = sendContext(a, stores, identities, await this.#sendLog(), this.#sealing(sealedSender));
 			// Our profile key lets the recipient decrypt our name and avatar.
-			const data = dataMessage(body, timestamp, isSelf ? undefined : fromBase64(a.profileKey));
+			const expiry = this.#chatTimers().forSend(`aci:${target}`);
+			const data = dataMessage(out.body, timestamp, isSelf ? undefined : fromBase64(a.profileKey), undefined, out.pointers, expiry, {
+				quote: out.quote?.bytes,
+				reaction: out.reaction?.bytes,
+				mentions: out.mentions,
+			});
 			const result: DirectSendResult = { timestamp };
 			if (!isSelf) {
 				result.recipientDevices = await sendToServiceId(ctx, target, contentWithData(data), timestamp, { accessKey: key, contentHint: CONTENT_HINT.RESENDABLE });
@@ -663,33 +729,134 @@ export class SignalClient {
 				if (isSelf) throw e;
 				result.syncError = String(e); // delivered, but our phone won't show it
 			}
-			await messages.add(
-				[{ kind: "message", conversation: `aci:${target}`, author: a.aci, authorDevice: a.deviceId, outgoing: true, sentAt: timestamp, body }],
-				`local-${timestamp}`,
-				timestamp,
-			);
+			if (out.stored.length) result.attachments = out.stored.length;
+			if (out.longText) result.longText = true;
+			await messages.add([outgoingRecord(`aci:${target}`, a, timestamp, out, expiry)], `local-${timestamp}`, timestamp);
 			result.safetyNumberChanged = await this.#recordIdentityChanges(ctx, messages);
 			return result;
 		});
 	}
 
 	/**
+	 * Uploads what a message needs besides its body: text past MAX_TEXT_BYTES as a long-text attachment
+	 * (listed first, as Desktop; the body keeps the start), then each file: a received attachment
+	 * forwarded by "<message>/<index>", text, or base64 data.
+	 */
+	async #prepareOutgoing(a: AccountSecrets, body: string, files: OutgoingFile[], extras: MessageExtras, conversation: string, members?: string[]): Promise<Outgoing> {
+		if (files.length > MAX_SEND_FILES) throw new Error(`at most ${MAX_SEND_FILES} attachments per message`);
+		const auth = deviceAuth(a);
+		// "@[aci:<uuid>]" tokens become mention placeholders; the ranges index the full text (a long text's
+		// attachment carries it whole, and receivers apply the ranges to that).
+		const extracted = body.trim() ? extractMentions(body) : { body: "", mentions: [] }; // whitespace beside attachments isn't a body
+		const text = extracted.body;
+		checkMentions(extracted.mentions, members); // before any upload
+		const out: Outgoing = { body: text, fullBody: text, pointers: [], stored: [], longText: false, mentions: extracted.mentions };
+		// Quote / reaction targets: a stored message in this very chat, by the id MCP listings show (its sentAt).
+		const store = await this.messageStore();
+		const target = async (sentAt: number) => {
+			const m = await store.findSent(conversation, sentAt);
+			if (!m) throw new Error(`no message with id ${sentAt} in this chat`);
+			// Quote.authorAci / Reaction.targetAuthorAci name an ACI; a PNI-only author can't be named there.
+			if (!ACI_PATTERN.test(m.author)) throw new Error(`message ${sentAt} has no ACI author to name`);
+			return m;
+		};
+		if (extras.replyTo !== undefined) {
+			const m = await target(extras.replyTo);
+			const quoted = m.body ? truncateUtf8(m.body, MAX_TEXT_BYTES) : undefined;
+			// Only the mentions that apply to the (possibly cut) quoted text, as showMentions shows them: a
+			// received range over ordinary words, or a second one on the same placeholder, mustn't be quoted
+			// back. None in 1:1 chats (no member list), where mentions aren't sent.
+			const mentions = quoted === undefined || !members ? [] : validMentions(quoted, m.mentions);
+			out.quote = {
+				bytes: quoteMessage(m.sentAt, m.author, quoted, mentions),
+				record: { id: m.sentAt, author: m.author, text: quoted, ...(mentions.length ? { mentions } : {}) },
+			};
+		}
+		if (extras.reaction) {
+			const { emoji, targetSentAt, remove } = extras.reaction;
+			if (!emoji.trim() || [...emoji].length > 8) throw new Error("reaction must be a single emoji");
+			const m = await target(targetSentAt);
+			out.reaction = {
+				bytes: reactionMessage(emoji, m.author, m.sentAt, !!remove),
+				record: { emoji, remove: !!remove, targetAuthor: m.author, targetSentAt: m.sentAt },
+			};
+		}
+		const bodyBytes = enc.encode(text);
+		if (bodyBytes.length > MAX_LONG_TEXT_BYTES) throw new Error(`message longer than ${MAX_LONG_TEXT_BYTES} bytes`);
+		// Independent uploads run concurrently; the long text stays first in the list, as Desktop sends it.
+		const [longText, ...uploaded] = await Promise.all([
+			bodyBytes.length > MAX_TEXT_BYTES ? uploadAttachment(auth, bodyBytes) : Promise.resolve(undefined),
+			...files.map(async (f) => {
+				const file = await this.#outgoingFile(f);
+				return { file, upload: await uploadAttachment(auth, file.data) };
+			}),
+		]);
+		if (longText) {
+			out.pointers.push(attachmentPointer(longText, { contentType: LONG_TEXT_TYPE }));
+			out.body = truncateUtf8(text, MAX_TEXT_BYTES);
+			out.longText = true;
+		}
+		for (const { file, upload: u } of uploaded) {
+			const { contentType, fileName, caption, voiceNote } = file;
+			out.pointers.push(attachmentPointer(u, { contentType, fileName, caption, voiceNote }));
+			out.stored.push({ contentType, fileName, size: u.size, caption, voiceNote, pointer: { cdnNumber: u.cdnNumber, cdnKey: u.cdnKey, key: u.key, digest: u.digest } });
+		}
+		this.#count("send:attachments uploaded", out.pointers.length);
+		return out;
+	}
+
+	/** The bytes and metadata of one file to send; checks the shape too, since the admin route passes raw JSON. */
+	async #outgoingFile(f: OutgoingFile): Promise<{ data: Uint8Array; contentType: string; fileName?: string; caption?: string; voiceNote?: boolean }> {
+		const caption = typeof f.caption === "string" && f.caption ? f.caption : undefined;
+		let file: { data: Uint8Array; contentType: string; fileName?: string; caption?: string; voiceNote?: boolean };
+		if ("ref" in f && typeof f.ref === "string") {
+			const m = /^(\d+)\/(\d+)$/.exec(f.ref);
+			if (!m) throw new Error(`attachment ref must look like "123/0", not ${JSON.stringify(f.ref)}`);
+			const got = await this.attachment(Number(m[1]), Number(m[2]));
+			file = { data: got.data, contentType: got.contentType ?? "application/octet-stream", fileName: got.fileName, caption, voiceNote: got.voiceNote };
+		} else if ("text" in f && typeof f.text === "string" && typeof f.fileName === "string") {
+			file = { data: enc.encode(f.text), contentType: f.contentType ?? "text/plain", fileName: f.fileName, caption };
+		} else if ("base64" in f && typeof f.base64 === "string" && typeof f.contentType === "string") {
+			let data: Uint8Array;
+			try {
+				data = fromBase64(f.base64);
+			} catch {
+				throw new Error(`attachment ${f.fileName ?? f.contentType}: base64 doesn't decode`);
+			}
+			file = { data, contentType: f.contentType, fileName: f.fileName, caption };
+		} else {
+			throw new Error("each attachment needs {ref}, {fileName, text} or {contentType, base64}");
+		}
+		const label = file.fileName ?? file.contentType;
+		if (!file.data.length) throw new Error(`attachment ${label} is empty`);
+		if (file.data.length > this.#maxAttachmentBytes) throw new Error(`attachment ${label} is ${file.data.length} bytes; the limit is ${this.#maxAttachmentBytes}`);
+		return file;
+	}
+
+	/**
 	 * Group text, sent as one 1:1-encrypted copy per member (Desktop's non-sender-key path), then a
 	 * sync transcript listing who got it. Member list and revision come from the groups server.
 	 */
-	async #sendGroupText(groupId: string, body: string): Promise<GroupSendResult> {
+	async #sendGroupText(groupId: string, prepare: (conversation: string, members: string[]) => Promise<Outgoing>, mentioned: string[] = []): Promise<GroupSendResult> {
 		const a = await this.#loadSecrets();
 		const dir = await this.directory();
 		let g = await dir.group(groupId);
 		if (!g) throw new Error(`unknown group ${groupId}; run a directory sync or wait for a message from it`);
-		if (!g.fetchedAt || !g.members || Date.now() - g.fetchedAt > GROUP_STALE_MS) g = await this.#refreshGroup(g);
+		// Refetch when stale, or when a mention names someone the cached list lacks (they may have just
+		// joined); a minute's grace keeps a mistyped mention from refetching on every try.
+		const lacksMentioned = (r: NonNullable<typeof g>) => mentioned.some((aci) => !r.members?.some((m) => m.aci === aci));
+		if (!g.fetchedAt || !g.members || Date.now() - g.fetchedAt > GROUP_STALE_MS || (lacksMentioned(g) && Date.now() - g.fetchedAt > 60_000)) {
+			g = await this.#refreshGroup(g);
+		}
 		if (g.fetchError) throw new Error(`can't send to this group: ${g.fetchError}`);
 		if (g.terminated) throw new Error("this group has been ended");
 		const me = g.members?.find((m) => m.aci === a.aci);
 		if (!me) throw new Error("this account is not a member of the group");
 		if (g.announcementsOnly && !me.admin) throw new Error("only admins can send in this group");
 		const group = g;
-		const recipients = (group.members ?? []).map((m) => m.aci).filter((aci) => aci !== a.aci);
+		const memberAcis = (group.members ?? []).map((m) => m.aci);
+		const recipients = memberAcis.filter((aci) => aci !== a.aci);
+		const out = await prepare(`group:${group.id}`, memberAcis);
 		const stores = await this.#loadStores();
 		const messages = await this.messageStore();
 		const identities = await this.#identities();
@@ -697,16 +864,52 @@ export class SignalClient {
 		// Group records are decrypted once here, not once per member whose key isn't in this group's state.
 		const allGroups = await dir.groups();
 		for (const m of group.members ?? []) if (m.aci !== a.aci) keys.set(m.aci, await this.#accessKey(m.aci, m.profileKey, allGroups));
-		const sealedSender = [...keys.values()].some(Boolean) ? await this.#sealedSender(a) : undefined;
+		// The certificate serves both sealed paths: access keys per member, or the group's endorsements.
+		const endorsements = senderKeyUsable(recipients, group.endorsements) ? group.endorsements : undefined;
+		const sealedSender = [...keys.values()].some(Boolean) || endorsements ? await this.#sealedSender(a) : undefined;
 		const groupIdBytes = fromBase64(group.id);
 		return this.#withProtocolLock(async () => {
 			const timestamp = Date.now();
 			const ctx = sendContext(a, stores, identities, await this.#sendLog(), this.#sealing(sealedSender));
-			const data = dataMessage(body, timestamp, fromBase64(a.profileKey), { masterKey: fromBase64(group.masterKey), revision: group.revision ?? 0 });
+			const expiry = this.#chatTimers().forSend(`group:${group.id}`, group.disappearingTimer);
+			const data = dataMessage(out.body, timestamp, fromBase64(a.profileKey), { masterKey: fromBase64(group.masterKey), revision: group.revision ?? 0 }, out.pointers, expiry, {
+				quote: out.quote?.bytes,
+				reaction: out.reaction?.bytes,
+				mentions: out.mentions,
+			});
 			const content = contentWithData(data);
 			const delivered: string[] = [];
 			const failed: { aci: string; error: string }[] = [];
+			// Sender key first (one encryption, one request), as Desktop; whoever it didn't reach gets
+			// a message of their own below.
+			let senderKey: { delivered: number; sharedWith: number; error?: string } | undefined;
+			if (endorsements && ctx.sealedSender) {
+				try {
+					const r = await sendWithSenderKey({
+						ctx,
+						groupId: group.id,
+						masterKey: fromBase64(group.masterKey),
+						members: memberAcis,
+						recipients,
+						endorsements,
+						content,
+						timestamp,
+						accessKeys: keys,
+						shares: this.#senderKeyShares(),
+					});
+					delivered.push(...r.delivered);
+					for (const aci of r.unregistered) failed.push({ aci, error: "not registered with Signal any more" });
+					senderKey = { delivered: r.delivered.length, sharedWith: r.sharedWith };
+					this.#count("send:sender-key", r.delivered.length);
+				} catch (e) {
+					senderKey = { delivered: 0, sharedWith: 0, error: String(e).slice(0, 200) };
+					this.#count("send:sender-key failed");
+					console.warn("sender-key send failed; sending to each member", e);
+				}
+			}
+			const done = new Set([...delivered, ...failed.map((f) => f.aci)]);
 			for (const aci of recipients) {
+				if (done.has(aci)) continue;
 				try {
 					await sendToServiceId(ctx, aci, content, timestamp, { accessKey: keys.get(aci), contentHint: CONTENT_HINT.RESENDABLE, groupId: groupIdBytes });
 					delivered.push(aci);
@@ -723,6 +926,7 @@ export class SignalClient {
 				members: recipients.length,
 				delivered: delivered.length,
 				sealedSender: sealedCount,
+				senderKey,
 				failed,
 			};
 			try {
@@ -730,11 +934,7 @@ export class SignalClient {
 			} catch (e) {
 				result.syncError = String(e);
 			}
-			await messages.add(
-				[{ kind: "message", conversation: `group:${group.id}`, author: a.aci, authorDevice: a.deviceId, outgoing: true, sentAt: timestamp, body }],
-				`local-${timestamp}`,
-				timestamp,
-			);
+			await messages.add([outgoingRecord(`group:${group.id}`, a, timestamp, out, expiry)], `local-${timestamp}`, timestamp);
 			result.safetyNumberChanged = await this.#recordIdentityChanges(ctx, messages);
 			return result;
 		});
@@ -850,9 +1050,10 @@ export class SignalClient {
 	}
 
 	/** Sealed-sender part of a SendContext: remembers access keys the server refused, so later sends skip them. */
-	#sealing(sealedSender: SendContext["sealedSender"]): Pick<SendContext, "sealedSender" | "onAccessKeyRefused"> {
+	#sealing(sealedSender: SendContext["sealedSender"]): Pick<SendContext, "sealedSender" | "onAccessKeyRefused" | "onUnsealed"> {
 		return {
 			sealedSender,
+			onUnsealed: (_serviceId, reason) => this.#count(`sealed-sender:skipped (${reason})`),
 			onAccessKeyRefused: (serviceId, key) => {
 				let refused = this.#refusedAccessKeys.get(serviceId);
 				if (!refused) this.#refusedAccessKeys.set(serviceId, (refused = new Set()));
@@ -949,14 +1150,44 @@ export class SignalClient {
 
 	// --- attachments (src/signal/attachments.ts) ---
 
+	/**
+	 * A message longer than about 2 KB arrives with only its start as the body and the whole text as a
+	 * `text/x-signal-plain` attachment (Desktop `sendNormalMessage`; its apps show the attachment as the
+	 * body). Fetch it and store the full text as the body, so readers see all of
+	 * it. On failure or timeout the record keeps the short body and the attachment reference.
+	 */
+	async #expandLongText(records: MessageRecord[], messages: MessageStore): Promise<void> {
+		const long = records.filter((rec) => rec.attachments?.some((a) => a.contentType === LONG_TEXT_TYPE));
+		if (!long.length) return;
+		const copies = long.map((rec) => structuredClone(rec));
+		const r = await expandLongText(copies, MAX_LONG_TEXT_BYTES, async (a) => {
+			let timer: ReturnType<typeof setTimeout> | undefined;
+			try {
+				return await Promise.race([
+					downloadAttachment(a.pointer!, a.size),
+					new Promise<never>((_, reject) => (timer = setTimeout(() => reject(new Error("timed out")), LONG_TEXT_TIMEOUT_MS))),
+				]);
+			} finally {
+				if (timer !== undefined) clearTimeout(timer);
+			}
+		});
+		for (const rec of copies) if (!rec.attachments?.some((a) => a.contentType === LONG_TEXT_TYPE)) await messages.replace(rec);
+		this.#count("receive:long text expanded", r.expanded);
+		this.#count("receive:long text not expanded", r.failed);
+	}
+
 	/** Downloads and decrypts attachment `index` of stored message `messageId` (the row id). */
-	async attachment(messageId: number, index: number, maxBytes = MAX_ATTACHMENT_BYTES): Promise<{ contentType?: string; fileName?: string; data: Uint8Array }> {
+	async attachment(messageId: number, index: number, maxBytes = this.#maxAttachmentBytes): Promise<{ contentType?: string; fileName?: string; voiceNote?: boolean; data: Uint8Array }> {
 		const m = await (await this.messageStore()).get(messageId);
 		const a = m?.attachments?.[index];
 		if (!a) throw new Error(`no attachment ${messageId}/${index}`);
 		if (!a.pointer) throw new Error("this attachment was received before the Worker kept download keys, or has none");
 		if (a.size !== undefined && a.size > maxBytes) throw new Error(`attachment is ${a.size} bytes; the limit is ${maxBytes}`);
-		return { contentType: a.contentType, fileName: a.fileName, data: await downloadAttachment(a.pointer, a.size) };
+		return { contentType: a.contentType, fileName: a.fileName, voiceNote: a.voiceNote, data: await downloadAttachment(a.pointer, a.size) };
+	}
+
+	get #maxAttachmentBytes(): number {
+		return this.#opts.maxAttachmentBytes ?? DEFAULT_MAX_ATTACHMENT_BYTES;
 	}
 
 	#notifyMessages(records: MessageRecord[], self: Self): void {
@@ -1047,7 +1278,9 @@ export class SignalClient {
 	}
 
 	#count(kind: string, n = 1): void {
-		if (n) this.#receive.kinds[kind] = (this.#receive.kinds[kind] ?? 0) + n;
+		if (!n) return;
+		this.#receive.kinds[kind] = (this.#receive.kinds[kind] ?? 0) + n;
+		this.#counters().bump(kind, n);
 	}
 
 	#sendLog(): Promise<SendLog> {
@@ -1345,7 +1578,7 @@ function basicAuth(user: string, password: string): string {
 
 /**
  * Context for sendToServiceId with our ACI store; pass `sendLog` for messages that may be resent,
- * and `sealing` (SignalAccount.#sealing) for sends that may go sealed sender.
+ * and `sealing` (SignalClient.#sealing) for sends that may go sealed sender.
  */
 function sendContext(
 	a: AccountSecrets,
@@ -1377,9 +1610,51 @@ function tryJson(body: Uint8Array): unknown {
 }
 
 function groupInfo(g: GroupRecord, names: Map<string, string>): GroupInfo {
-	const { masterKey: _m, members, ...rest } = g;
+	const { masterKey: _m, members, endorsements: _e, ...rest } = g; // no keys or endorsements in tool output
 	// Field by field: member records also hold profile keys.
 	return { ...rest, members: members?.map((m) => ({ aci: m.aci, admin: m.admin, name: names.get(m.aci) })) };
+}
+
+/** A file to attach: forward a received attachment by "<message row id>/<index>", or new content. */
+export type OutgoingFile =
+	| { ref: string; caption?: string }
+	| { fileName: string; contentType?: string; text: string; caption?: string }
+	| { fileName?: string; contentType: string; base64: string; caption?: string };
+
+/** A message ready to send: `body` as sent (shortened when long text went as an attachment). */
+type Outgoing = {
+	body: string;
+	fullBody: string;
+	pointers: Uint8Array[];
+	stored: Attachment[];
+	longText: boolean;
+	/** @mentions in the body (DataMessage.bodyRanges, 18). */
+	mentions: Mention[];
+	/** DataMessage.quote (8) and its stored form. */
+	quote?: { bytes: Uint8Array; record: NonNullable<MessageRecord["quote"]> };
+	/** DataMessage.reaction (16) and its stored form; a reaction is sent on its own. */
+	reaction?: { bytes: Uint8Array; record: NonNullable<MessageRecord["reaction"]> };
+};
+
+/** Reply to a message (quote it) or react to one, by the message's sentAt (the id MCP listings show). */
+export type MessageExtras = { replyTo?: number; reaction?: { emoji: string; targetSentAt: number; remove?: boolean } };
+
+/** Our copy of a sent message: the full text, and the files (with pointers, so get_attachment works). */
+function outgoingRecord(conversation: string, a: AccountSecrets, sentAt: number, out: Outgoing, expiry: Expiry): MessageRecord {
+	return {
+		kind: out.reaction ? "reaction" : "message",
+		...(out.reaction ? { reaction: out.reaction.record } : {}),
+		...(out.quote ? { quote: out.quote.record } : {}),
+		...(out.mentions.length ? { mentions: out.mentions } : {}),
+		conversation,
+		author: a.aci,
+		authorDevice: a.deviceId,
+		outgoing: true,
+		sentAt,
+		body: out.fullBody || undefined,
+		expireTimer: expiry.expireTimer || undefined,
+		...(out.stored.length ? { attachments: out.stored } : {}),
+	};
 }
 
 /** Chat entry for a contact's new identity key (Signal's "safety number changed"). */

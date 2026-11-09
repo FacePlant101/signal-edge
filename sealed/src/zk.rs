@@ -7,7 +7,7 @@ use libsignal_account_keys::AccountEntropyPool;
 use libsignal_core::{Aci, Pni, ServiceId};
 use wasm_bindgen::prelude::*;
 use zkgroup::auth::{AuthCredentialWithPni, AuthCredentialWithPniResponse};
-use zkgroup::groups::{GroupMasterKey, GroupSecretParams, ProfileKeyCiphertext, UuidCiphertext};
+use zkgroup::groups::{GroupMasterKey, GroupSecretParams, GroupSendEndorsement, GroupSendEndorsementsResponse, ProfileKeyCiphertext, UuidCiphertext};
 use zkgroup::profiles::ProfileKey;
 use zkgroup::{ServerPublicParams, Timestamp};
 
@@ -110,4 +110,58 @@ pub fn derive_access_key(profile_key: &[u8]) -> Result<Vec<u8>, JsError> {
 pub fn master_key_from_entropy_pool(pool: &str) -> Result<Vec<u8>, JsError> {
     let pool: AccountEntropyPool = pool.parse().map_err(|_| JsError::new("invalid account entropy pool"))?;
     Ok(pool.derive_svr_key().to_vec())
+}
+
+// --- group send endorsements (sender-key sends: PUT /v1/messages/multi_recipient) ---
+
+/// Verifies `GroupResponse.group_send_endorsements_response` for the group's full member list
+/// (`member_acis`, our own ACI included, as Desktop `receiveWithServiceIds`) and returns one
+/// serialized endorsement per member, in that order, back to back.
+#[wasm_bindgen]
+pub fn receive_group_send_endorsements(
+    response: &[u8],
+    member_acis: Vec<String>,
+    now_seconds: f64,
+    group_secret_params: &[u8],
+    server_public_params: &[u8],
+) -> Result<Vec<u8>, JsError> {
+    let response = zkgroup::deserialize::<GroupSendEndorsementsResponse>(response).map_err(js_err)?;
+    let ids = member_acis
+        .iter()
+        .map(|a| Aci::parse_from_service_id_string(a).map(ServiceId::from).ok_or_else(|| JsError::new("member is not an ACI")))
+        .collect::<Result<Vec<_>, _>>()?;
+    let received = response
+        .receive_with_service_ids_single_threaded(
+            ids,
+            Timestamp::from_epoch_seconds(now_seconds as u64),
+            &secret_params(group_secret_params)?,
+            &server_params(server_public_params)?,
+        )
+        .map_err(js_err)?;
+    Ok(received.iter().flat_map(|r| zkgroup::serialize(&r.decompressed)).collect())
+}
+
+/// Expiration of the endorsements in a response, in epoch seconds.
+#[wasm_bindgen]
+pub fn group_send_endorsements_expiration(response: &[u8]) -> Result<f64, JsError> {
+    let response = zkgroup::deserialize::<GroupSendEndorsementsResponse>(response).map_err(js_err)?;
+    Ok(response.expiration().epoch_seconds() as f64)
+}
+
+/// `Group-Send-Token` for a set of recipients: their endorsements (`count` of them, back to back, as
+/// stored from `receive_group_send_endorsements`) combined, turned into a token for this group and
+/// bound to the response's expiration (Desktop `GroupSendEndorsementState.buildToken`).
+#[wasm_bindgen]
+pub fn group_send_full_token(endorsements: &[u8], count: u32, group_secret_params: &[u8], expiration_seconds: f64) -> Result<Vec<u8>, JsError> {
+    if count == 0 || endorsements.len() % count as usize != 0 {
+        return Err(JsError::new("group_send_full_token: endorsements don't split evenly"));
+    }
+    let size = endorsements.len() / count as usize;
+    let parts = endorsements
+        .chunks(size)
+        .map(|c| zkgroup::deserialize::<GroupSendEndorsement>(c).map_err(js_err))
+        .collect::<Result<Vec<_>, _>>()?;
+    let params = secret_params(group_secret_params)?;
+    let token = GroupSendEndorsement::combine(parts).to_token(params).into_full_token(Timestamp::from_epoch_seconds(expiration_seconds as u64));
+    Ok(zkgroup::serialize(&token))
 }

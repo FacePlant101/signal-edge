@@ -4,8 +4,8 @@
 // bundle we fetch before sending, so those two places check and record it. Like Signal's apps,
 // a changed key is accepted and reported ("safety number changed"), not blocked.
 
-import { dec, enc, fromBase64, toBase64 } from "../util/bytes.js";
 import type { SqlDatabase } from "../sql.js";
+import { dec, enc, fromBase64, toBase64 } from "../util/bytes.js";
 import type { Sealer } from "../util/sealer.js";
 import { Decoded } from "./proto.js";
 

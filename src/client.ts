@@ -371,7 +371,9 @@ export class SignalClient {
 		await chat?.close().catch(() => {});
 		// Let protocol work already holding the lock finish (it is bounded by request timeouts); work
 		// queued behind it sees the new generation and stops.
-		await Promise.race([this.#protocol, new Promise((r) => setTimeout(r, RESET_WAIT_MS))]);
+		let waited: ReturnType<typeof setTimeout> | undefined;
+		await Promise.race([this.#protocol, new Promise((r) => (waited = setTimeout(r, RESET_WAIT_MS)))]);
+		if (waited !== undefined) clearTimeout(waited);
 		this.#db.transaction(() => {
 			for (const t of SIGNAL_TABLES) this.#db.exec(`DELETE FROM ${t}`);
 		});

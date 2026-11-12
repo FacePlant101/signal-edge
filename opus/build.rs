@@ -39,12 +39,10 @@ fn main() {
     files.extend(sources(&src.join("celt_sources.mk"), "CELT_SOURCES"));
     files.extend(sources(&src.join("silk_sources.mk"), "SILK_SOURCES"));
     files.extend(sources(&src.join("silk_sources.mk"), "SILK_SOURCES_FIXED"));
-    // Only the single-stream API: multistream, projection and the repacketizer aren't used.
-    files.extend(
-        sources(&src.join("opus_sources.mk"), "OPUS_SOURCES")
-            .into_iter()
-            .filter(|f| matches!(f.as_str(), "src/opus.c" | "src/opus_decoder.c" | "src/opus_encoder.c" | "src/extensions.c")),
-    );
+    // Only the single-stream API (the encoder uses the repacketizer): multistream and projection aren't used.
+    files.extend(sources(&src.join("opus_sources.mk"), "OPUS_SOURCES").into_iter().filter(|f| {
+        matches!(f.as_str(), "src/opus.c" | "src/opus_decoder.c" | "src/opus_encoder.c" | "src/extensions.c" | "src/repacketizer.c")
+    }));
 
     let mut build = cc::Build::new();
     build

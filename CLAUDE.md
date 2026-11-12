@@ -9,7 +9,7 @@ A Signal client library, Workers first, runtime-pluggable: a linked device, or a
 - Tests: `npm test` (Node). CI runs them on Node 22, 24 and 26; 26 is the default (`.nvmrc`, releases, the example Worker bundle). `test/network.test.mjs` connects to Signal (pinned TLS, provisioning socket) only with `SIGNAL_NETWORK_TESTS=1`; CI sets it. Cloud sessions can't run it (no DNS/raw TCP egress).
 - Releases: version + CHANGELOG.md in a PR, then tag `v<version>`; `.github/workflows/release.yml` stages it on npm (`npm stage publish`, trusted publishing/OIDC, or the `NPM_TOKEN` secret until that is set up); the owner approves it with 2FA (npmjs.com or `npm stage approve <stage-id>`). `prepublishOnly` runs typecheck and tests.
 - `src/protocol/*`: Signal protocol pieces; `src/net/*`: TLS socket, HTTP/1.1, WebSocket; `src/selftest/*` (`signal-edge/selftest`): network-free self-tests.
-- `tls/`, `sealed/`: Rust crates built to `src/vendor/` (checked in). `scripts/copy-vendor.mjs` copies them into `dist/`.
+- `tls/`, `sealed/`, `opus/`: Rust crates built to `src/vendor/` (checked in). `opus/` compiles libopus, which `scripts/build-opus.sh` fetches into `opus/libopus` (untracked) at a pinned commit; its license is `opus/LICENSE-libopus`. `scripts/copy-vendor.mjs` copies them into `dist/`.
 - `examples/worker`: minimal Durable Object app; `npm run check` bundles it with Wrangler (dry run).
 
 ## Rules

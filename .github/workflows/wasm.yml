@@ -1,5 +1,5 @@
 name: WASM
-# Builds src/vendor/ (tls/ and sealed/ compiled to WebAssembly) from source and checks that the committed
+# Builds src/vendor/ (tls/, sealed/ and opus/ compiled to WebAssembly) from source and checks that the committed
 # files are exactly what this workflow builds. The build is reproducible: pinned toolchain
 # (rust-toolchain.toml, wasm-bindgen-cli 0.2.130, Ubuntu 24.04's clang 18) and local paths mapped away.
 # - The build job runs the branch's code (build scripts, Rust build.rs) with a read-only token.
@@ -12,10 +12,10 @@ name: WASM
 #   runs with write access.
 on:
   pull_request:
-    paths: ["tls/**", "sealed/**", "src/vendor/**", "scripts/build-*.sh", "rust-toolchain.toml", ".github/workflows/wasm.yml"]
+    paths: ["tls/**", "sealed/**", "opus/**", "src/vendor/**", "scripts/build-*.sh", "rust-toolchain.toml", ".github/workflows/wasm.yml"]
   push:
     branches: [main]
-    paths: ["tls/**", "sealed/**", "src/vendor/**", "scripts/build-*.sh", "rust-toolchain.toml", ".github/workflows/wasm.yml"]
+    paths: ["tls/**", "sealed/**", "opus/**", "src/vendor/**", "scripts/build-*.sh", "rust-toolchain.toml", ".github/workflows/wasm.yml"]
   workflow_dispatch:
     inputs:
       commit:
@@ -44,13 +44,14 @@ jobs:
             ~/.cargo/registry/index
             ~/.cargo/registry/cache
             ~/.cargo/git/db
-          key: wasm-${{ hashFiles('rust-toolchain.toml', 'tls/Cargo.lock', 'sealed/Cargo.lock') }}
+          key: wasm-${{ hashFiles('rust-toolchain.toml', 'tls/Cargo.lock', 'sealed/Cargo.lock', 'opus/Cargo.lock') }}
       - name: wasm-bindgen-cli 0.2.130
         run: wasm-bindgen --version 2>/dev/null | grep -q '0.2.130' || cargo install wasm-bindgen-cli --version 0.2.130 --locked
       - name: TLS crate tests (host)
         run: cargo test --locked --manifest-path tls/Cargo.toml --target x86_64-unknown-linux-gnu
       - run: bash scripts/build-tls.sh
       - run: bash scripts/build-sealed.sh
+      - run: bash scripts/build-opus.sh
       - run: sha256sum src/vendor/*/*.wasm
       - uses: actions/upload-artifact@v7
         with:
@@ -59,7 +60,9 @@ jobs:
       - name: The committed files are what this build produced
         if: github.event_name != 'workflow_dispatch' || !inputs.commit
         run: |
-          if git diff --quiet src/vendor; then echo "src/vendor/ matches the build"; exit 0; fi
+          # --porcelain also lists new files (a new module's output), which git diff doesn't.
+          if [ -z "$(git status --porcelain src/vendor)" ]; then echo "src/vendor/ matches the build"; exit 0; fi
+          git status --short src/vendor
           git diff --stat src/vendor
           echo "::error::src/vendor/ differs from the CI build. Use the 'vendor' artifact of this run, or run this workflow with commit=true on the branch."
           exit 1
@@ -95,8 +98,9 @@ jobs:
           path: src/vendor
       - name: Commit the rebuilt files
         run: |
-          git diff --quiet src/vendor && { echo "src/vendor/ is already up to date"; exit 0; }
+          [ -z "$(git status --porcelain src/vendor)" ] && { echo "src/vendor/ is already up to date"; exit 0; }
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git commit -am "Rebuild src/vendor/ (WASM workflow, run ${{ github.run_id }})"
+          git add src/vendor
+          git commit -m "Rebuild src/vendor/ (WASM workflow, run ${{ github.run_id }})"
           git push

@@ -15,16 +15,17 @@ import { configure, SignalClient, type RawSocket, type SignalClientOptions, type
 const require = createRequire(import.meta.url);
 
 /** Compiled once, when this module is first imported. */
-const [signalWasm, sealedWasm, tlsWasm] = await Promise.all([
+const [signalWasm, sealedWasm, tlsWasm, opusWasm] = await Promise.all([
 	readFile(require.resolve("@getmaapp/signal-wasm/signal_wasm_bg.wasm")),
 	readFile(new URL("./vendor/signal-sealed/signal_sealed_bg.wasm", import.meta.url)),
 	readFile(new URL("./vendor/signal-tls/signal_tls_bg.wasm", import.meta.url)),
+	readFile(new URL("./vendor/signal-opus/signal_opus_bg.wasm", import.meta.url)),
 ].map(async (bytes) => WebAssembly.compile(await bytes)));
 
 configure({
 	// Signal's servers use Signal's own CA: plain TCP here, TLS in WASM pinned to Signal's roots.
 	connect: nodeConnect,
-	wasm: { signal: signalWasm!, sealed: sealedWasm!, tls: tlsWasm! },
+	wasm: { signal: signalWasm!, sealed: sealedWasm!, tls: tlsWasm!, opus: opusWasm! },
 });
 
 export * from "signal-edge";

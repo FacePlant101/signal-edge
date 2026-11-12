@@ -25,6 +25,8 @@ export type WasmModules = {
 	sealed: WasmSource;
 	/** `signal-edge/wasm/signal-tls/signal_tls_bg.wasm`: TLS 1.3 pinned to Signal's roots (tls/). */
 	tls: WasmSource;
+	/** `signal-edge/wasm/signal-opus/signal_opus_bg.wasm`: libopus, for opusCodec() in calls (opus/). */
+	opus: WasmSource;
 };
 
 export type Runtime = {

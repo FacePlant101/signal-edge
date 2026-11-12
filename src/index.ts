@@ -36,6 +36,7 @@ export {
 export { encodeCallMessage, decodeCallMessage, contentWithCallMessage, negotiateSrtpKeys, HANGUP_TYPE, OFFER_TYPE, type CallMessage } from "./calling/signaling.js";
 export { TurnClient, turnServers, type TurnServer, type IceServerGroup } from "./calling/turn.js";
 export { opusSamples } from "./calling/rtp.js";
+export { opusCodec, type OpusCodecOptions } from "./calling/opus.js";
 
 // Host plumbing
 export { configure, type Runtime, type Connect, type RawSocket, type WasmModules, type WasmSource } from "./runtime.js";

@@ -13,3 +13,5 @@ examples/*/dist/
 *.sqlite
 dist-node/
 examples/node/*.db*
+opus/target/
+opus/libopus/

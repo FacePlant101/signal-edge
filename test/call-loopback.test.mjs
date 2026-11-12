@@ -53,6 +53,7 @@ class FakeTurn {
 			}
 		};
 		const relay = (to, data) => {
+			if (server.drop?.(data)) return server.stats.dropped++;
 			const target = server.allocations.get(`${to.ip}|${to.port}`);
 			if (alloc.permissions.has(to.ip) && target) target.deliver(alloc.relayed, data);
 			else server.stats.dropped++;
@@ -348,6 +349,90 @@ test("PCM in and out through a pluggable codec, 20 ms frames", async () => {
 	await until("three frames heard", () => heard.length === 3);
 	assert.deepEqual(heard, [1, 2, 3]);
 	assert.throws(() => incoming.sendPcm(new Int16Array(960)), /no codec/);
+	await call.hangup();
+	await incoming.ended;
+});
+
+test("the built-in Opus codec (libopus): a tone survives a call, and a lost packet is concealed", async () => {
+	const { opusCodec } = await import("../dist/index.js");
+	// Codec alone: 440 Hz in, about 440 Hz out.
+	const c = opusCodec();
+	assert.equal(c.frameSize, 960);
+	const tone = (n, offset = 0) => Int16Array.from({ length: n }, (_, i) => Math.round(8000 * Math.sin((2 * Math.PI * 440 * (i + offset)) / 48000)));
+	const crossings = (pcm) => {
+		let n = 0;
+		for (let i = 1; i < pcm.length; i++) if ((pcm[i - 1] < 0) !== (pcm[i] < 0)) n++;
+		return n;
+	};
+	let decoded = [];
+	for (let f = 0; f < 25; f++) {
+		const packet = c.encode(tone(960, f * 960));
+		assert.ok(packet.length > 0 && packet.length < 400);
+		decoded.push(...c.decode(packet));
+	}
+	const steady = Int16Array.from(decoded.slice(48000 * 0.1)); // past the codec's start-up
+	const hz = crossings(steady) / 2 / (steady.length / 48000);
+	assert.ok(Math.abs(hz - 440) < 15, `decoded tone at ${hz.toFixed(1)} Hz`);
+	const rms = Math.sqrt(steady.reduce((s, v) => s + v * v, 0) / steady.length);
+	assert.ok(rms > 3000 && rms < 8000, `level kept (rms ${rms.toFixed(0)})`);
+	assert.equal(c.conceal(960).length, 960);
+	assert.throws(() => c.encode(new Int16Array(1000)), /frame/);
+	assert.throws(() => c.decode(new Uint8Array([0xff, 0xff, 0xff])), /opus/);
+	c.free();
+
+	// Through a call, both ends with opusCodec().
+	const net = network();
+	let incoming;
+	net.add("bob", 1, (call) => (incoming = call));
+	const alice = net.add("alice", 1);
+	const call = await alice.start(ACI.bob, { codec: () => opusCodec() });
+	await until("ringing", () => incoming);
+	const heard = [];
+	await incoming.accept();
+	await until("connected", () => call.state === "connected" && incoming.state === "connected");
+	call.sendPcm(tone(48000 * 0.5));
+	// Bob's side has no codec of its own: decode what arrives with a separate one.
+	const d = opusCodec();
+	incoming.onAudio = (p) => heard.push(...d.decode(p.opus));
+	await until("half a second heard", () => heard.length >= 48000 * 0.5);
+	const got = Int16Array.from(heard.slice(4800));
+	const gotHz = crossings(got) / 2 / (got.length / 48000);
+	assert.ok(Math.abs(gotHz - 440) < 15, `tone through the call at ${gotHz.toFixed(1)} Hz`);
+	d.free();
+	await call.hangup();
+	await incoming.ended;
+});
+
+test("a lost audio packet is concealed for onPcm, with the next packet's FEC", async () => {
+	const concealed = [];
+	const codec = () => ({
+		encode: (pcm) => new Uint8Array([0x78, pcm[0] & 0xff, 0]),
+		decode: (packet) => new Int16Array(960).fill(packet[1]),
+		conceal: (samples, next) => {
+			concealed.push({ samples, next: next?.[1] });
+			return new Int16Array(samples).fill(-1);
+		},
+	});
+	const net = network();
+	let incoming;
+	net.add("bob", 1, (c) => (incoming = c));
+	const alice = net.add("alice", 1);
+	const call = await alice.start(ACI.bob, { codec });
+	await until("ringing", () => incoming);
+	await incoming.accept();
+	await until("connected", () => call.state === "connected" && incoming.state === "connected");
+	// Bob sends six packets; alice (whose call has the codec) decodes them for onPcm. The third is
+	// lost on the way (SRTP leaves the RTP header readable: payload type 102 is audio).
+	const heard = [];
+	call.onPcm = (pcm) => heard.push(pcm[0]);
+	let audio = 0;
+	turn.drop = (data) => data[0] >> 6 === 2 && (data[1] & 0x7f) === 102 && ++audio === 3;
+	const packets = codec();
+	for (let i = 1; i <= 6; i++) incoming.sendAudio(packets.encode(new Int16Array(960).fill(i)));
+	await until("five packets and a concealment heard", () => heard.length === 6);
+	turn.drop = undefined;
+	assert.deepEqual(heard, [1, 2, -1, 4, 5, 6]);
+	assert.deepEqual(concealed, [{ samples: 960, next: 4 }]);
 	await call.hangup();
 	await incoming.ended;
 });

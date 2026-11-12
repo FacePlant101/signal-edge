@@ -2,6 +2,17 @@
 
 signal-edge follows [semantic versioning](https://semver.org) for 0.x: a breaking change bumps the minor version.
 
+## Unreleased
+
+- **Voice calls**: 1:1 voice calls with Signal's apps, both ways. `startCall(to)` rings every device of the callee, and `onIncomingCall` (a client option) receives calls to `accept()` or `decline()`. A `SignalCall` reports `onState`, takes Opus packets with `sendAudio()` (paced at real time, `clearAudio()` to drop what's queued) and gives them to `onAudio`. With an `OpusCodec` you bring (`callOptions.codec`) it also takes and gives 48 kHz PCM (`sendPcm()`, `onPcm`). It speaks RingRTC's protocol:
+  - CallMessage signaling with its V4 connection parameters.
+  - ICE through a TURN relay reached over TCP (Signal's relays from `GET /v2/calling/relays`), since Workers have no UDP.
+  - SRTP AEAD_AES_256_GCM keyed from the signaled X25519 keys and both identity keys.
+  - Opus on payload type 102, and the RTP data channel for accepted and hangup.
+  - Multi-device answering (the first to accept wins, and the others hear "accepted on another device"), busy, decline, a 60 s ring timeout, offers older than a minute ignored, and ICE consent freshness.
+  The pieces are tested against RFC 5769, RFC 7714 and RFC 6188 vectors, and whole calls are tested between two of our stacks through a test TURN server. It hasn't been run against a phone yet. The example Worker can place and answer echo calls.
+- `parseContent` returns a CallMessage's bytes (`call`), and `receiveEnvelope` returns the envelope's `serverTimestamp`.
+
 ## 0.5.0
 
 - **Profile name**: `setProfileName(given, family?)` sets the account's profile name as its primary device (`PUT /v1/profile`), as Signal-Desktop does: the name (`given\0family`, zero-padded to 53 or 257 bytes) encrypted with AES-256-GCM under the profile key, phone-number sharing off, no avatar, and the profile key's version and commitment for our ACI (new WASM exports `profile_key_version` and `profile_key_commitment`, from libsignal's zkgroup). People we message see the name once their app fetches the profile with the profile key our messages carry. `profileName()` returns the name this device last set. Linked devices refuse: their profile belongs to the phone. The encryption helpers are exported (`encryptProfileName`, `decryptProfileName`, `encryptProfileItem`, `decryptProfileItem`, `checkProfileName`, `profileRequestBody`, `setProfile`).

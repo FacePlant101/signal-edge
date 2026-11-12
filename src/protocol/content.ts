@@ -200,6 +200,8 @@ export type ParsedContent = {
 	groups: GroupContext[];
 	/** Disappearing-message timers seen in plain messages and timer updates (src/signal/timers.ts). */
 	timers: TimerSeen[];
+	/** A CallMessage (Content field 3), serialized: call signaling (src/calling/). */
+	call?: Uint8Array;
 };
 
 export type GroupContext = { masterKey: Uint8Array; revision: number };
@@ -213,7 +215,7 @@ export type GroupContext = { masterKey: Uint8Array; revision: number };
  */
 export function parseContent(plaintext: Uint8Array, sender: string, senderDevice: number, ourAci: string): ParsedContent {
 	const c = new Decoded(plaintext);
-	const out: ParsedContent = { records: [], senderKeyDistribution: c.bytes(7), decryptionError: c.bytes(8), kinds: [], groups: [], timers: [] };
+	const out: ParsedContent = { records: [], senderKeyDistribution: c.bytes(7), decryptionError: c.bytes(8), kinds: [], groups: [], timers: [], call: c.bytes(3) };
 
 	const data = c.bytes(1);
 	if (data) {

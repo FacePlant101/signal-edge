@@ -1,14 +1,23 @@
 // A minimal Signal linked device on Cloudflare Workers: link it with a QR code, read what arrives,
-// send texts. One Durable Object holds the account; every route needs the admin token.
+// send texts, and place (or, with ANSWER_CALLS=echo, answer) voice calls that echo your voice back.
+// One Durable Object holds the account; every route needs the admin token.
 import { DurableObject } from "cloudflare:workers";
-import { durableObjectHost, durableObjectSql, Sealer, SignalClient, type MessageRecord } from "signal-edge/workers";
+import { durableObjectHost, durableObjectSql, Sealer, SignalClient, type MessageRecord, type SignalCall } from "signal-edge/workers";
 import { linkCryptoSelfTest, receiverSelfTest, storeSelfTest } from "signal-edge/selftest";
 
 type Env = {
 	ACCOUNT: DurableObjectNamespace<SignalAccount>;
 	ADMIN_TOKEN: string;
 	STORAGE_KEY: string;
+	/** "echo": answer incoming calls (before the phone does!) and play the caller's voice back. */
+	ANSWER_CALLS?: string;
 };
+
+/** Plays back what the other side says: a codec-free way to hear that audio flows both ways. */
+function echo(call: SignalCall): void {
+	call.onAudio = (p) => call.sendAudio(p.opus);
+	call.onState = (state) => console.log(`call ${call.direction} ${state}${call.endReason ? ` (${call.endReason})` : ""}`);
+}
 
 export class SignalAccount extends DurableObject<Env> {
 	readonly client: SignalClient;
@@ -22,6 +31,13 @@ export class SignalAccount extends DurableObject<Env> {
 			onMessages: (records: MessageRecord[]) => {
 				for (const r of records) if (r.kind === "message" && !r.outgoing) console.log(`message in ${r.conversation}`);
 			},
+			onIncomingCall:
+				env.ANSWER_CALLS === "echo"
+					? (call) => {
+							echo(call);
+							void call.accept().catch((e) => console.error("answering failed", e));
+						}
+					: undefined,
 		});
 	}
 
@@ -49,6 +65,21 @@ export class SignalAccount extends DurableObject<Env> {
 
 	send(to: string, body: string) {
 		return this.client.sendText(to, body);
+	}
+
+	/** Calls `to` and echoes their voice back to them. */
+	async call(to: string) {
+		const call = await this.client.startCall(to);
+		echo(call);
+		return { id: String(call.id), state: call.state };
+	}
+
+	async calls() {
+		return (await this.client.calls()).map((c) => ({ id: String(c.id), peer: c.peer, direction: c.direction, state: c.state }));
+	}
+
+	async hangup() {
+		for (const c of await this.client.calls()) await c.hangup();
 	}
 
 	/** Runs the self-tests in this (scratch) instance, then wipes it. Never on the linked account. */
@@ -100,6 +131,15 @@ export default {
 					const { to, body } = (await req.json()) as { to: string; body: string };
 					return Response.json(await account.send(to, body));
 				}
+				// { "to": "aci:<uuid>" }: rings them; once they answer they hear themselves (needs the receive socket up).
+				case "POST /call": {
+					const { to } = (await req.json()) as { to: string };
+					return Response.json(await account.call(to));
+				}
+				case "GET /calls":
+					return Response.json(await account.calls());
+				case "POST /hangup":
+					return Response.json(await account.hangup());
 				// Checks the crypto and storage on this runtime, in a throwaway Durable Object.
 				case "POST /selftest":
 					return Response.json(await env.ACCOUNT.getByName(`selftest-${crypto.randomUUID()}`).selfTest());

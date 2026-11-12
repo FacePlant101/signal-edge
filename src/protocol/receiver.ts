@@ -13,7 +13,7 @@ export type Self = { aci: string; pni?: string; deviceId: number };
 
 export type ReceiveResult =
 	| { status: "ignored"; reason: string }
-	| { status: "decrypted"; sender: string; senderDevice: number; parsed: ParsedContent; serverGuid?: string; identityChanged?: boolean };
+	| { status: "decrypted"; sender: string; senderDevice: number; parsed: ParsedContent; serverGuid?: string; identityChanged?: boolean; serverTimestamp?: number };
 
 export async function receiveEnvelope(
 	body: Uint8Array,
@@ -109,7 +109,7 @@ export async function receiveEnvelope(
 		await sig.processSenderKeyDistribution(remote(), parsed.senderKeyDistribution, aci.senderKeys);
 		await aci.saveSenderKey(sender, device, distributionId(parsed.senderKeyDistribution, false));
 	}
-	return { status: "decrypted", sender, senderDevice: device, parsed, serverGuid: env.serverGuid, identityChanged };
+	return { status: "decrypted", sender, senderDevice: device, parsed, serverGuid: env.serverGuid, identityChanged, serverTimestamp: env.serverTimestamp };
 }
 
 /** The public half (33 bytes) of a serialized identity key pair; empty when there is none. */

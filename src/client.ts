@@ -43,6 +43,9 @@ import {
 	type FailedMessage,
 } from "./protocol/retry.js";
 import { attachmentPointer, downloadAttachment, expandLongText, LONG_TEXT_TYPE, truncateUtf8, uploadAttachment } from "./protocol/attachments.js";
+import { CallManager, type CallOptions, type SignalCall } from "./calling/call.js";
+import { contentWithCallMessage, decodeCallMessage, type CallMessage } from "./calling/signaling.js";
+import type { IceServerGroup } from "./calling/turn.js";
 import { Counters, createCounterSchema, type LastError, type LastingCounter } from "./counters.js";
 import { blob, type SqlDatabase, type SqlValue } from "./sql.js";
 import { dec, enc, fromBase64, randomBytes, toBase64 } from "./util/bytes.js";
@@ -261,6 +264,15 @@ export type SignalClientOptions = {
 	scheduleMaintenance?: (at: number) => void | Promise<void>;
 	/** Records newly stored from one incoming envelope (duplicates excluded). Errors are logged, not thrown. */
 	onMessages?: (records: MessageRecord[], self: Self) => void | Promise<void>;
+	/**
+	 * A 1:1 voice call is ringing us: call `accept()` or `decline()` on it (or let it time out).
+	 * Without this, incoming calls are ignored (our other devices still ring). The receive socket
+	 * must be up for call signaling, and the host must stay alive for the call (a Durable Object
+	 * does while the call's TURN connection is open).
+	 */
+	onIncomingCall?: (call: SignalCall) => void;
+	/** Defaults for every call, e.g. an Opus codec for sendPcm()/onPcm. */
+	callOptions?: CallOptions;
 };
 
 /** Tables the client owns (reset() empties them). */
@@ -356,6 +368,10 @@ export class SignalClient {
 	/** A verifyCode() in progress: a second call (e.g. a double click) waits for it instead of registering again. */
 	#verifying?: Promise<LinkState>;
 	#loggingIn?: Promise<LinkState>;
+	/** Calls of the current account, with the generation they belong to. */
+	#callManager?: { generation: number; manager: Promise<CallManager> };
+	/** Call signaling is handled in arrival order (an answer before its ICE candidates). */
+	#callSignaling: Promise<unknown> = Promise.resolve();
 
 	/** Creates the tables if needed and reads the link state. Synchronous; no network. */
 	constructor(opts: SignalClientOptions) {
@@ -751,6 +767,9 @@ export class SignalClient {
 		// Unlinked from the start: maintain() and the like stop at once. Until reset() returns, other
 		// calls that read the account fail with AccountForgotten.
 		this.#link = { state: "unlinked" };
+		const calls = this.#callManager;
+		this.#callManager = undefined;
+		void calls?.manager.then((m) => m.endAll()).catch(() => {});
 		await this.#socket?.close().catch(() => {});
 		const chat = this.#chat;
 		this.#chat = undefined;
@@ -957,6 +976,7 @@ export class SignalClient {
 				this.#count(`ignored:${r.reason}`);
 			} else {
 				for (const k of r.parsed.kinds) this.#count(k);
+				if (r.parsed.call) this.#onCallMessage(generation, r.sender, r.senderDevice, r.parsed.call, r.serverTimestamp);
 				// Outside the protocol lock (may fetch group state): Signal's apps drop group messages from
 				// non-members, and so do we, before anything is stored or reported.
 				await this.#dropNonMembers(generation, r.parsed, r.sender, self);
@@ -1160,6 +1180,100 @@ export class SignalClient {
 			const data = dataMessage(body, timestamp, fromBase64(a.profileKey), undefined, [], expiry);
 			await sendToServiceId(ctx, target, contentWithData(data), timestamp, { accessKey: key, contentHint: CONTENT_HINT.RESENDABLE });
 		});
+	}
+
+	// --- calls (src/calling/) ---
+
+	/**
+	 * Calls `to` (`aci:<uuid>` or a bare UUID): a 1:1 voice call, ringing all their devices. Resolves
+	 * once the offer is sent; watch `call.onState` / `call.ended`, and send audio with `sendAudio()`
+	 * (Opus) or `sendPcm()` (with a codec). The receive socket must be up: answers arrive on it.
+	 */
+	async startCall(to: string, opts: CallOptions = {}): Promise<SignalCall> {
+		const target = to.replace(/^aci:/, "").toLowerCase();
+		if (!ACI_PATTERN.test(target)) throw new Error("recipient must be an ACI (UUID)");
+		const generation = this.#generation;
+		const a = await this.#loadSecrets();
+		if (target === a.aci) throw new Error("can't call ourselves");
+		await this.#connectChat().catch(() => {}); // answers come over the chat socket
+		const manager = await this.#calls(generation);
+		return manager.start(target, opts);
+	}
+
+	/** Calls in progress (at most one). */
+	async calls(): Promise<SignalCall[]> {
+		const m = this.#callManager;
+		return m && m.generation === this.#generation ? (await m.manager).calls : [];
+	}
+
+	#calls(generation: number): Promise<CallManager> {
+		this.#stillCurrent(generation);
+		if (this.#callManager?.generation !== generation) {
+			const manager = (async () => {
+				const a = await this.#loadSecrets();
+				const identities = await this.#identities();
+				const ourIdentityKey = signal().WasmIdentityKeyPair.deserialize(fromBase64(a.aciIdentityKeyPair)).public_key.serialize();
+				return new CallManager(
+					{
+						ourAci: a.aci,
+						ourDeviceId: a.deviceId,
+						ourIdentityKey,
+						peerIdentityKey: (aci) => identities.get(aci),
+						send: (aci, m, urgent) => this.#sendCallMessage(generation, a, aci, m, urgent),
+						iceServers: () => this.#iceServers(generation, a),
+					},
+					this.#opts.onIncomingCall,
+					this.#opts.callOptions,
+				);
+			})();
+			manager.catch(() => {
+				if (this.#callManager?.manager === manager) this.#callManager = undefined;
+			});
+			this.#callManager = { generation, manager };
+		}
+		return this.#callManager.manager;
+	}
+
+	#onCallMessage(generation: number, sender: string, device: number, bytes: Uint8Array, sentAt: number | undefined): void {
+		let message: CallMessage;
+		try {
+			message = decodeCallMessage(bytes);
+		} catch (e) {
+			this.#count("call:unreadable");
+			return;
+		}
+		const work = this.#callSignaling.then(async () => {
+			if (generation !== this.#generation) return;
+			// Nothing to do with a call nobody listens for: don't set calling up for it.
+			if (!this.#opts.onIncomingCall && !this.#callManager) return;
+			const outcome = await (await this.#calls(generation)).handle(sender, device, message, sentAt);
+			this.#count(`call:${outcome}`);
+		});
+		this.#callSignaling = work.catch((e) => {
+			if (!(e instanceof AccountForgotten)) console.error("call signaling failed", e);
+		});
+		this.#opts.waitUntil?.(this.#callSignaling);
+	}
+
+	/** One CallMessage to every device of `to`: sealed when we can, never kept for resending. */
+	async #sendCallMessage(generation: number, a: AccountSecrets, to: string, m: CallMessage, urgent: boolean): Promise<void> {
+		const stores = await this.#loadStores();
+		const identities = await this.#identities();
+		const key = await this.#accessKey(to);
+		const sealedSender = key && (await this.#sealedSender(a));
+		await this.#withProtocolLock(generation, async () => {
+			const ctx = this.#sendContext(a, stores, identities, undefined, sealedSender);
+			await sendToServiceId(ctx, to, contentWithCallMessage(m), Date.now(), { accessKey: key, urgent, contentHint: CONTENT_HINT.DEFAULT });
+		});
+	}
+
+	/** GET /v2/calling/relays: TURN servers and short-lived credentials for this call. */
+	async #iceServers(generation: number, a: AccountSecrets): Promise<IceServerGroup[]> {
+		this.#stillCurrent(generation);
+		const res = await signalFetch(CHAT_HOST, "GET", "/v2/calling/relays", { headers: { Authorization: deviceAuth(a) }, timeoutMs: 15_000, maxBytes: 64 * 1024, signal: this.#aborter.signal });
+		if (res.status !== 200) throw new Error(`GET /v2/calling/relays failed: HTTP ${res.status}`);
+		const body = JSON.parse(dec.decode(res.body)) as { relays?: IceServerGroup[] };
+		return Array.isArray(body.relays) ? body.relays : [];
 	}
 
 	// --- sending ---

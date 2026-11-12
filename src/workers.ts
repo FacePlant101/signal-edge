@@ -6,6 +6,7 @@ import { connect } from "cloudflare:sockets";
 import signalWasm from "@getmaapp/signal-wasm/signal_wasm_bg.wasm";
 import sealedWasm from "./vendor/signal-sealed/signal_sealed_bg.wasm";
 import tlsWasm from "./vendor/signal-tls/signal_tls_bg.wasm";
+import opusWasm from "./vendor/signal-opus/signal_opus_bg.wasm";
 import { configure } from "./runtime.js";
 import type { SignalClientOptions } from "./client.js";
 import type { SqlDatabase, SqlValue } from "./sql.js";
@@ -13,7 +14,7 @@ import type { SqlDatabase, SqlValue } from "./sql.js";
 configure({
 	// Signal's servers use Signal's own CA, which fetch() can't verify: plain TCP, TLS in WASM.
 	connect: (hostname, port) => connect({ hostname, port }, { secureTransport: "off", allowHalfOpen: false }),
-	wasm: { signal: signalWasm, sealed: sealedWasm, tls: tlsWasm },
+	wasm: { signal: signalWasm, sealed: sealedWasm, tls: tlsWasm, opus: opusWasm },
 });
 
 export * from "./index.js";

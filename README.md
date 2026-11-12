@@ -36,6 +36,7 @@ Not there yet: phone-number lookup (CDSI needs SGX attestation, so recipients ar
 SignalClient            linking, receive loop, send, contacts/groups, keys, retries, calls
   protocol/             envelopes, Content, sender, receiver, stores, groups, storage service
   calling/              call state machine, RingRTC signaling, ICE, TURN over TCP, SRTP, RTP
+    opus/ (C, Rust)     libopus 1.5.2, fixed point, for opusCodec()
     signal-wasm         libsignal sessions, ratchet, prekeys, sender keys  (@getmaapp/signal-wasm)
     sealed/ (Rust)      sealed sender seal/unseal, zkgroup, access keys    (libsignal v0.106.1)
   net/                  HTTP/1.1, WebSocket, TLS socket
@@ -155,7 +156,7 @@ The WASM files are `@getmaapp/signal-wasm/signal_wasm_bg.wasm`, `signal-edge/was
 | `messages(limit, chat?)`, `conversations()`, `chats()` | stored history; chats include known groups and contact names |
 | `syncDirectory()`, `contacts()`, `groups()`, `group(id, refresh?)`, `names()` | contacts and groups (no keys in the output) |
 | `attachment(messageId, index, maxBytes?)` | downloads and decrypts an attachment of a stored message |
-| `startCall(to, opts?)`, `calls()`; option `onIncomingCall` | 1:1 voice calls, see [Calls](#calls) |
+| `startCall(to, opts?)`, `calls()`; options `onIncomingCall`, `callOptions` | 1:1 voice calls, see [Calls](#calls); `opusCodec()` for PCM |
 | `refreshKeys(force?)`, `keyStatus()`, `whoami()` | prekey maintenance and a credentials check |
 | `reset()` | forgets the account locally (empties `SIGNAL_TABLES`) |
 | `messageStore()`, `directory()` | lower-level stores |
@@ -184,7 +185,17 @@ call.sendAudio(opusPacket); // queued and paced at real time; clearAudio() drops
 console.log(await call.ended); // "hangup", "remote-hangup", "declined", "busy", "timeout", "failed", …
 ```
 
-Audio is Opus packets in and out (any frame size up to 120 ms; Signal's apps send 60 ms). For PCM, give the call a codec (`callOptions: { codec: () => myOpus }` on the client, or per call): an `OpusCodec` with `encode(Int16Array) → Uint8Array` and `decode(Uint8Array) → Int16Array` at 48 kHz mono, for example a libopus WebAssembly build. Then `call.sendPcm(samples)` (any length, framed into 20 ms) and `call.onPcm`. The library has no codec of its own.
+Audio is Opus packets in and out (any frame size up to 120 ms; Signal's apps send 60 ms). For PCM (48 kHz, mono, `Int16Array`), give calls a codec. `opusCodec()` is libopus 1.5.2 compiled to WebAssembly, set up as RingRTC sets up Opus: VoIP, constant 32 kbit/s, in-band FEC and DTX.
+
+```ts
+import { opusCodec } from "signal-edge/workers";
+
+new SignalClient({ ...host, callOptions: { codec: () => opusCodec() } }); // or per call: startCall(to, { codec })
+call.sendPcm(samples); // any length; framed into 20 ms (opusCodec({ frameMs: 60 }) for fewer packets)
+call.onPcm = (pcm) => {}; // decoded audio; short losses are concealed (with FEC from the next packet)
+```
+
+Any object with `encode(Int16Array) → Uint8Array` and `decode(Uint8Array) → Int16Array` will do instead (`OpusCodec`).
 
 How it works (following RingRTC, the calling library inside Signal's apps):
 
@@ -211,7 +222,7 @@ SIGNAL_NETWORK_TESTS=1 npm test   # also connects to Signal's servers (no accoun
 cd examples/worker && npm install && npm run check   # typecheck + wrangler bundle (dry run)
 ```
 
-The WASM in `src/vendor/` is built by GitHub Actions (`.github/workflows/wasm.yml`), reproducibly: a pinned toolchain (`rust-toolchain.toml`, `wasm-bindgen-cli` 0.2.130, Ubuntu 24.04's clang 18) and no local paths in the output. Every change to the Rust code or the binaries is rebuilt in CI and must match the committed files byte for byte, and each build on `main` gets a provenance attestation (`gh attestation verify src/vendor/signal-tls/signal_tls_bg.wasm -R FacePlant101/signal-edge --signer-workflow FacePlant101/signal-edge/.github/workflows/wasm.yml --source-ref refs/heads/main`). After changing `tls/` or `sealed/`, either run `npm run build:tls` / `npm run build:sealed` with that toolchain (rustup, clang and llvm-ar, `wasm-bindgen-cli` 0.2.130, `protoc`) and commit `src/vendor/`, or run the WASM workflow on your branch with `commit` ticked. Releases: bump `version` in package.json and add to CHANGELOG.md in a PR; after it merges, push the tag `v<version>`: the Release workflow tests the tagged commit and stages that version on npm (`npm stage publish`, with provenance), and it goes public once a maintainer approves it with 2FA. After a change to either `Cargo.lock`, regenerate the license notices with `python3 scripts/third-party-licenses.py` and commit `THIRD_PARTY_LICENSES.txt`.
+The WASM in `src/vendor/` (`tls/`, `sealed/`, and `opus/`, which compiles libopus fetched by `scripts/build-opus.sh` at a pinned commit) is built by GitHub Actions (`.github/workflows/wasm.yml`), reproducibly: a pinned toolchain (`rust-toolchain.toml`, `wasm-bindgen-cli` 0.2.130, Ubuntu 24.04's clang 18) and no local paths in the output. Every change to the Rust code or the binaries is rebuilt in CI and must match the committed files byte for byte, and each build on `main` gets a provenance attestation (`gh attestation verify src/vendor/signal-tls/signal_tls_bg.wasm -R FacePlant101/signal-edge --signer-workflow FacePlant101/signal-edge/.github/workflows/wasm.yml --source-ref refs/heads/main`). After changing `tls/`, `sealed/` or `opus/`, either run `npm run build:tls` / `npm run build:sealed` / `npm run build:opus` with that toolchain (rustup, clang and llvm-ar, `wasm-bindgen-cli` 0.2.130, `protoc`) and commit `src/vendor/`, or run the WASM workflow on your branch with `commit` ticked. Releases: bump `version` in package.json and add to CHANGELOG.md in a PR; after it merges, push the tag `v<version>`: the Release workflow tests the tagged commit and stages that version on npm (`npm stage publish`, with provenance), and it goes public once a maintainer approves it with 2FA. After a change to either `Cargo.lock`, regenerate the license notices with `python3 scripts/third-party-licenses.py` and commit `THIRD_PARTY_LICENSES.txt`.
 
 ## Security
 
@@ -224,6 +235,7 @@ signal-edge stands on Signal's own work. Thanks to:
 - **[Signal Messenger](https://signal.org)**: [Signal-Desktop](https://github.com/signalapp/Signal-Desktop), whose linking, sending, receiving, groups and storage-service code this library follows and in places ports (each source file names the Desktop functions it follows), and [libsignal](https://github.com/signalapp/libsignal), whose Rust crates `sealed/` is built on and whose root certificates `tls/` pins. [Signal-Android](https://github.com/signalapp/Signal-Android) was a reference for timer behaviour.
 - **[signal-wasm](https://github.com/getmaapp/signal-wasm)** by getmaapp: libsignal compiled to WebAssembly. It made a Worker-native client possible.
 - **[rustls](https://github.com/rustls/rustls)** and **[ring](https://github.com/briansmith/ring)**: the TLS 1.3 stack inside `tls/`.
+- **[RingRTC](https://github.com/signalapp/ringrtc)** by Signal: the call protocol `src/calling/` speaks. **[libopus](https://opus-codec.org)** by Xiph.Org and contributors (BSD-3-Clause): the codec inside `opus/`.
 - **[wasm-bindgen](https://github.com/rustwasm/wasm-bindgen)**, the **[RustCrypto](https://github.com/RustCrypto)** crates, **[curve25519-dalek](https://github.com/dalek-cryptography/curve25519-dalek)**, **[libcrux](https://github.com/cryspen/libcrux)** and the other crates listed in [THIRD_PARTY_LICENSES.txt](THIRD_PARTY_LICENSES.txt), with their licenses.
 
 Written by FacePlant101.
@@ -232,4 +244,4 @@ Written by FacePlant101.
 
 ## License
 
-AGPL-3.0-only (see [LICENSE](LICENSE) and [NOTICE](NOTICE)). libsignal, which `sealed/` and `@getmaapp/signal-wasm` are built from, is AGPL-3.0. If you run a modified version as a network service, the AGPL requires you to offer its source to that service's users. The prebuilt WebAssembly also contains crates under MIT, Apache-2.0, ISC, BSD, MPL-2.0 and Unicode licenses; their notices are in [THIRD_PARTY_LICENSES.txt](THIRD_PARTY_LICENSES.txt).
+AGPL-3.0-only (see [LICENSE](LICENSE) and [NOTICE](NOTICE)). libsignal, which `sealed/` and `@getmaapp/signal-wasm` are built from, is AGPL-3.0. If you run a modified version as a network service, the AGPL requires you to offer its source to that service's users. The prebuilt WebAssembly also contains libopus (BSD-3-Clause) and crates under MIT, Apache-2.0, ISC, BSD, MPL-2.0 and Unicode licenses; their notices are in [THIRD_PARTY_LICENSES.txt](THIRD_PARTY_LICENSES.txt).

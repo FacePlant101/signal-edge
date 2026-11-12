@@ -13,6 +13,7 @@ configure({
 		signal: wasm(require.resolve("@getmaapp/signal-wasm/signal_wasm_bg.wasm")),
 		sealed: wasm(new URL("../dist/vendor/signal-sealed/signal_sealed_bg.wasm", import.meta.url)),
 		tls: wasm(new URL("../dist/vendor/signal-tls/signal_tls_bg.wasm", import.meta.url)),
+		opus: wasm(new URL("../dist/vendor/signal-opus/signal_opus_bg.wasm", import.meta.url)),
 	},
 });
 

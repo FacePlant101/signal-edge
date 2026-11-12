@@ -57,12 +57,16 @@ export type CallEndReason =
 /** One received Opus packet. `timestamp` is the RTP timestamp (48 kHz). */
 export type AudioPacket = { opus: Uint8Array; timestamp: number; sequence: number };
 
-/** An Opus codec (48 kHz, mono) for the PCM helpers; bring your own (e.g. a libopus WASM build). */
+/** An Opus codec (48 kHz, mono) for the PCM helpers: `opusCodec()` (libopus), or your own. */
 export interface OpusCodec {
-	/** One frame of 48 kHz mono PCM (2.5–60 ms; sendPcm uses 20 ms = 960 samples) → one Opus packet. */
+	/** One frame of 48 kHz mono PCM (`frameSize` samples) → one Opus packet. */
 	encode(pcm: Int16Array): Uint8Array;
 	/** One Opus packet → 48 kHz mono PCM. */
 	decode(packet: Uint8Array): Int16Array;
+	/** Samples per frame for sendPcm() (default 960: 20 ms). */
+	frameSize?: number;
+	/** Fills `samples` of lost audio; `next` (the packet after the gap) lets it use in-band FEC. */
+	conceal?(samples: number, next?: Uint8Array): Int16Array;
 	free?(): void;
 }
 
@@ -95,7 +99,9 @@ const RTP_DATA_INTERVAL_MS = 1_000;
 const MAX_BITRATE_BPS = 100_000n;
 /** How much audio sendAudio() may queue ahead of real time. */
 const MAX_QUEUED_MS = 60_000;
-const PCM_FRAME = 960; // 20 ms
+const PCM_FRAME = 960; // 20 ms, unless the codec says otherwise
+/** Gaps (lost packets) up to this many are concealed for onPcm; longer ones start afresh. */
+const MAX_CONCEALED_PACKETS = 5;
 /** Devices answering one outgoing call that we keep a leg for (Signal allows a handful per account). */
 const MAX_LEGS = 8;
 
@@ -160,6 +166,8 @@ export class SignalCall {
 	#tsAt = 0;
 	#nextAt = 0;
 	#pcm = new Int16Array(0);
+	/** Incoming audio, for concealing losses: the last sequence number decoded, and its samples. */
+	#lastHeard?: { seq: number; samples: number };
 
 	private constructor(host: CallHost, opts: CallOptions, onFinished: (c: SignalCall) => void, init: { id: bigint; peer: string; direction: "outgoing" | "incoming"; video: boolean; state: CallState }) {
 		this.#host = host;
@@ -264,8 +272,9 @@ export class SignalCall {
 		const all = new Int16Array(this.#pcm.length + pcm.length);
 		all.set(this.#pcm);
 		all.set(pcm, this.#pcm.length);
+		const frame = this.#codec.frameSize ?? PCM_FRAME;
 		let off = 0;
-		for (; off + PCM_FRAME <= all.length; off += PCM_FRAME) this.sendAudio(this.#codec.encode(all.subarray(off, off + PCM_FRAME)));
+		for (; off + frame <= all.length; off += frame) this.sendAudio(this.#codec.encode(all.subarray(off, off + frame)));
 		this.#pcm = all.slice(off);
 	}
 
@@ -400,7 +409,33 @@ export class SignalCall {
 		const packet = { opus: p.payload, timestamp: p.timestamp, sequence: p.seq };
 		try {
 			this.onAudio?.(packet, this);
-			if (this.#codec && this.onPcm && p.payload.length > 2) this.onPcm(this.#codec.decode(p.payload), this);
+		} catch (e) {
+			console.error("call audio handler failed", e);
+		}
+		if (this.#codec && this.onPcm) this.#decode(p.payload, p.seq);
+	}
+
+	/** Decodes for onPcm, concealing short gaps first (in-band FEC from this packet for the last one). */
+	#decode(opus: Uint8Array, seq: number): void {
+		const codec = this.#codec!;
+		const last = this.#lastHeard;
+		const gap = last ? (seq - last.seq - 1) & 0xffff : 0;
+		if (last && gap >= 0x8000) return; // late (reordered) packet: its moment has passed
+		const out: Int16Array[] = [];
+		try {
+			if (last && gap > 0 && gap <= MAX_CONCEALED_PACKETS && codec.conceal) {
+				for (let i = 0; i < gap; i++) out.push(codec.conceal(last.samples, i === gap - 1 ? opus : undefined));
+			}
+			const pcm = codec.decode(opus);
+			out.push(pcm);
+			this.#lastHeard = { seq, samples: pcm.length || last?.samples || PCM_FRAME };
+		} catch (e) {
+			// A malformed packet (the peer's word): skip it.
+			this.#lastHeard = { seq, samples: last?.samples ?? PCM_FRAME };
+			return;
+		}
+		try {
+			for (const pcm of out) if (pcm.length) this.onPcm?.(pcm, this);
 		} catch (e) {
 			console.error("call audio handler failed", e);
 		}

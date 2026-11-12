@@ -40,6 +40,14 @@ to WebAssembly, providing sessions, the Double Ratchet, prekeys and sender keys.
 installed from npm, not copied into this repository.
 
 
+LIBOPUS
+
+src/vendor/signal-opus is compiled from libopus 1.5.2 (https://github.com/xiph/opus, BSD-3-Clause),
+Copyright 2001-2023 Xiph.Org, Skype Limited, Octasic, Jean-Marc Valin, Timothy B. Terriberry, CSIRO,
+Gregory Maxwell, Mark Borgerding, Erik de Castro Lopo, Mozilla, Amazon. Its license, with the Opus
+royalty-free patent license references, is in opus/LICENSE-libopus and THIRD_PARTY_LICENSES.txt.
+
+
 RUST CRATES IN THE PREBUILT WEBASSEMBLY
 
 src/vendor/signal-tls and src/vendor/signal-sealed are compiled together with third-party crates,

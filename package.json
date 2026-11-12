@@ -64,6 +64,7 @@
 		"prepare": "npm run build",
 		"build:tls": "bash scripts/build-tls.sh",
 		"build:sealed": "bash scripts/build-sealed.sh",
+		"build:opus": "bash scripts/build-opus.sh",
 		"prepublishOnly": "npm run typecheck && npm test"
 	},
 	"dependencies": {

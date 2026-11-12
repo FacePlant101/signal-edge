@@ -11,6 +11,7 @@ signal-edge follows [semantic versioning](https://semver.org) for 0.x: a breakin
   - Opus on payload type 102, and the RTP data channel for accepted and hangup.
   - Multi-device answering (the first to accept wins, and the others hear "accepted on another device"), busy, decline, a 60 s ring timeout, offers older than a minute ignored, and ICE consent freshness.
   The pieces are tested against RFC 5769, RFC 7714 and RFC 6188 vectors, and whole calls are tested between two of our stacks through a test TURN server. It hasn't been run against a phone yet. The example Worker can place and answer echo calls.
+- **Built-in Opus codec**: `opusCodec({ bitrate?, frameMs? })` is libopus 1.5.2 compiled to WebAssembly (`opus/`, a new module in `src/vendor/signal-opus`, built by the WASM workflow like the others). It's a fixed-point build with no float API and no DNN features, set up as RingRTC sets up Opus: VoIP, constant 32 kbit/s, in-band FEC and DTX. With `callOptions: { codec: () => opusCodec() }`, `sendPcm()` and `onPcm` work with 48 kHz mono PCM. Received audio is concealed across up to five lost packets, using the next packet's in-band FEC. `signal-edge/workers` and `signal-edge/node` load the module, and other runtimes add `wasm.opus` to `configure()`. An `OpusCodec` can now set its `frameSize` and offer `conceal()`.
 - `parseContent` returns a CallMessage's bytes (`call`), and `receiveEnvelope` returns the envelope's `serverTimestamp`.
 
 ## 0.5.0

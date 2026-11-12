@@ -1,6 +1,6 @@
 # signal-edge
 
-A Signal client that runs as a **linked device** (like Signal Desktop) inside Cloudflare Workers or Node.js, or any JavaScript runtime that can open a TCP socket and run WebAssembly. It links to an existing Signal account with a QR code, or registers a phone number as a new **standalone** account with no phone app (like Signal Desktop's nightly builds). It keeps a live connection to Signal, decrypts what arrives, and sends 1:1 and group messages with attachments, quotes, reactions and mentions. No signal-cli, JVM, container or VPS.
+A Signal client that runs as a **linked device** (like Signal Desktop) inside Cloudflare Workers or Node.js, or any JavaScript runtime that can open a TCP socket and run WebAssembly. It links to an existing Signal account with a QR code, or registers a phone number as a new **standalone** account with no phone app (like Signal Desktop's nightly builds). It keeps a live connection to Signal, decrypts what arrives, and sends 1:1 and group messages with attachments, quotes, reactions and mentions. It can also place and answer 1:1 **voice calls** with Signal's apps, speaking RingRTC's protocol over a TURN relay. No signal-cli, JVM, container or VPS.
 
 > **Unofficial.** This is not Signal's software, Signal doesn't support it, and it can break whenever Signal changes its servers. Try it with a spare number first. It handles real end-to-end-encrypted traffic and stores keys that can read it: treat the storage key like a password.
 
@@ -25,15 +25,17 @@ It has run a real account in production on Cloudflare Workers since 2026-11-09.
 | Sender-key group sends (`multi_recipient`, group send endorsements; falls back to one copy per member) | deployed; not yet run in a group of 3+ |
 | Disappearing-message timers, quoted replies, reactions, mentions | built; not yet seen on real clients |
 | Counters and last errors that survive restarts | built |
+| 1:1 voice calls (RingRTC signaling, ICE over TURN/TCP, SRTP AES-256-GCM, Opus packets; see [Calls](#calls)) | loopback-tested (two of our call stacks through a test TURN server); not yet run against a phone |
 | Node.js (`signal-edge/node`) | unit-tested; CI reaches Signal's servers with it on every run (TLS, provisioning socket); not yet run against an account |
 
-Not there yet: phone-number lookup (CDSI needs SGX attestation, so recipients are ACIs), delivery/read receipts, stories, calls, a PIN and registration lock for standalone accounts (SVR2 needs SGX attestation, so such an account can only be registered again with a new code), profile avatars and about text, usernames.
+Not there yet: phone-number lookup (CDSI needs SGX attestation, so recipients are ACIs), delivery/read receipts, stories, video and group calls, a PIN and registration lock for standalone accounts (SVR2 needs SGX attestation, so such an account can only be registered again with a new code), profile avatars and about text, usernames.
 
 ## How it works
 
 ```
-SignalClient            linking, receive loop, send, contacts/groups, keys, retries
+SignalClient            linking, receive loop, send, contacts/groups, keys, retries, calls
   protocol/             envelopes, Content, sender, receiver, stores, groups, storage service
+  calling/              call state machine, RingRTC signaling, ICE, TURN over TCP, SRTP, RTP
     signal-wasm         libsignal sessions, ratchet, prekeys, sender keys  (@getmaapp/signal-wasm)
     sealed/ (Rust)      sealed sender seal/unseal, zkgroup, access keys    (libsignal v0.106.1)
   net/                  HTTP/1.1, WebSocket, TLS socket
@@ -153,11 +155,47 @@ The WASM files are `@getmaapp/signal-wasm/signal_wasm_bg.wasm`, `signal-edge/was
 | `messages(limit, chat?)`, `conversations()`, `chats()` | stored history; chats include known groups and contact names |
 | `syncDirectory()`, `contacts()`, `groups()`, `group(id, refresh?)`, `names()` | contacts and groups (no keys in the output) |
 | `attachment(messageId, index, maxBytes?)` | downloads and decrypts an attachment of a stored message |
+| `startCall(to, opts?)`, `calls()`; option `onIncomingCall` | 1:1 voice calls, see [Calls](#calls) |
 | `refreshKeys(force?)`, `keyStatus()`, `whoami()` | prekey maintenance and a credentials check |
 | `reset()` | forgets the account locally (empties `SIGNAL_TABLES`) |
 | `messageStore()`, `directory()` | lower-level stores |
 
 The building blocks are exported too (`signalFetch`, `SignalSocket`, `ProtocolStore`, `receiveEnvelope`, `sendToServiceId`, `readStorage`, `fetchGroupState`, `unseal`, `decryptAttachment`, …), for anyone who wants to drive the protocol themselves. `signal-edge/selftest` has three self-tests that need no network: link crypto, store persistence, and the receive path (sealed sender, sender keys, identity changes, retry requests).
+
+## Calls
+
+1:1 voice calls with Signal's phone and desktop apps:
+
+```ts
+const client = new SignalClient({
+	...durableObjectHost(ctx),
+	storageKey,
+	// Without this, incoming calls are ignored here (your other devices still ring).
+	onIncomingCall: (call) => {
+		call.onAudio = (p) => call.sendAudio(p.opus); // echo: they hear themselves
+		void call.accept(); // or call.decline()
+	},
+});
+
+const call = await client.startCall("aci:<uuid>"); // rings all their devices
+call.onState = (state) => console.log(state); // calling → ringing → connected → ended
+call.onAudio = ({ opus }) => {}; // Opus packets from them (48 kHz, mono)
+call.sendAudio(opusPacket); // queued and paced at real time; clearAudio() drops what's queued
+console.log(await call.ended); // "hangup", "remote-hangup", "declined", "busy", "timeout", "failed", …
+```
+
+Audio is Opus packets in and out (any frame size up to 120 ms; Signal's apps send 60 ms). For PCM, give the call a codec (`callOptions: { codec: () => myOpus }` on the client, or per call): an `OpusCodec` with `encode(Int16Array) → Uint8Array` and `decode(Uint8Array) → Int16Array` at 48 kHz mono, for example a libopus WebAssembly build. Then `call.sendPcm(samples)` (any length, framed into 20 ms) and `call.onPcm`. The library has no codec of its own.
+
+How it works (following RingRTC, the calling library inside Signal's apps):
+
+- **Signaling** goes over the normal message path: `CallMessage` offers (urgent, so phones wake up), answers, ICE candidates, hangups and busy, each carrying RingRTC's opaque `ConnectionParametersV4` (an X25519 public key and ICE credentials). Offers older than a minute are ignored, as in RingRTC.
+- **Transport**: Workers can't send UDP, so the call allocates a relay on one of Signal's TURN servers (`GET /v2/calling/relays`) and reaches it over **TCP** (`turn:` URLs; `turns:` is skipped because the runtime connector is plain TCP). ICE checks run from that relay to each candidate the other side signals. Private, mDNS and TCP candidates can't be reached from a relay and are skipped or fail. Consent checks keep the path alive, and the call fails if the peer goes quiet for 30 s.
+- **Media**: SRTP with AEAD_AES_256_GCM. The keys are HKDF over the X25519 agreement plus both identity keys (so a call is bound to the safety number, as in RingRTC), with no DTLS. Opus goes on payload type 102, and our SSRC is 1002 as the caller or 2002 as the callee. Incoming video and RTCP are dropped unread.
+- **Control**: RingRTC's RTP data channel (payload type 101) carries "accepted", hangups and our sender status. When you call someone with several devices, each device that answers gets its own ICE and SRTP leg. The first one to send "accepted" wins, and the others are told "accepted on another device".
+
+On Workers, a call's TURN connection keeps the Durable Object alive for as long as the call lasts. Call signaling arrives on the receive socket, so keep it up (`maintain()` does). Calls are one at a time: a second incoming call is answered busy. Who may call (strangers, message requests) is for your `onIncomingCall` to decide.
+
+Status: the protocol pieces are tested against published vectors (RFC 5769 STUN, RFC 7714 SRTP-GCM, RFC 6188 key derivation), and whole calls are tested between two of our own stacks through a test TURN server (`test/call-loopback.test.mjs`). Interop with RingRTC is built from its source (signaling.proto, rtp_data.proto, `negotiate_srtp_keys`, and the SDP that `Rust_sessionDescriptionFromV4` builds) but hasn't been run against a phone yet. The example Worker has `POST /call` (rings someone and echoes their voice back) and `ANSWER_CALLS=echo`, so this can be checked with two Signal accounts.
 
 ## Storage
 

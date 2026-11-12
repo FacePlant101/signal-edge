@@ -21,6 +21,22 @@ export {
 	type GroupInfo,
 } from "./client.js";
 
+// Calls: 1:1 voice calls with Signal's apps (RingRTC's protocol over TURN/TCP)
+export {
+	SignalCall,
+	CallManager,
+	RING_TIMEOUT_MS,
+	type CallState,
+	type CallEndReason,
+	type CallOptions,
+	type CallHost,
+	type AudioPacket,
+	type OpusCodec,
+} from "./calling/call.js";
+export { encodeCallMessage, decodeCallMessage, contentWithCallMessage, negotiateSrtpKeys, HANGUP_TYPE, OFFER_TYPE, type CallMessage } from "./calling/signaling.js";
+export { TurnClient, turnServers, type TurnServer, type IceServerGroup } from "./calling/turn.js";
+export { opusSamples } from "./calling/rtp.js";
+
 // Host plumbing
 export { configure, type Runtime, type Connect, type RawSocket, type WasmModules, type WasmSource } from "./runtime.js";
 export { type SqlDatabase, type SqlValue } from "./sql.js";

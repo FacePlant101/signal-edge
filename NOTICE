@@ -23,6 +23,11 @@ porting, Signal's own AGPL-3.0-only software. Copyright Signal Messenger, LLC.
   from its rust/net/res/. Wire formats follow its protobuf definitions and its chat client.
 - Signal-Android (https://github.com/signalapp/Signal-Android): referenced for how the apps treat
   disappearing-message timers.
+- RingRTC (https://github.com/signalapp/ringrtc) and Signal's WebRTC fork
+  (https://github.com/signalapp/webrtc): src/calling/ follows RingRTC's 1:1 call protocol: its
+  signaling.proto and rtp_data.proto messages, the SRTP key derivation (negotiate_srtp_keys), the
+  call and hangup rules of call_fsm.rs and call_manager.rs, and the media parameters (payload types,
+  SSRCs, SRTP suite) of ringrtc/rffi/src/peer_connection.cc. No RingRTC code is included.
 
 "Signal" is a trademark of Signal Messenger, LLC. signal-edge is an independent, unofficial project.
 It is not affiliated with, sponsored by or endorsed by Signal Messenger, LLC.

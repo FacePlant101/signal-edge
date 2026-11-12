@@ -60,7 +60,9 @@ jobs:
       - name: The committed files are what this build produced
         if: github.event_name != 'workflow_dispatch' || !inputs.commit
         run: |
-          if git diff --quiet src/vendor; then echo "src/vendor/ matches the build"; exit 0; fi
+          # --porcelain also lists new files (a new module's output), which git diff doesn't.
+          if [ -z "$(git status --porcelain src/vendor)" ]; then echo "src/vendor/ matches the build"; exit 0; fi
+          git status --short src/vendor
           git diff --stat src/vendor
           echo "::error::src/vendor/ differs from the CI build. Use the 'vendor' artifact of this run, or run this workflow with commit=true on the branch."
           exit 1
@@ -96,8 +98,9 @@ jobs:
           path: src/vendor
       - name: Commit the rebuilt files
         run: |
-          git diff --quiet src/vendor && { echo "src/vendor/ is already up to date"; exit 0; }
+          [ -z "$(git status --porcelain src/vendor)" ] && { echo "src/vendor/ is already up to date"; exit 0; }
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git commit -am "Rebuild src/vendor/ (WASM workflow, run ${{ github.run_id }})"
+          git add src/vendor
+          git commit -m "Rebuild src/vendor/ (WASM workflow, run ${{ github.run_id }})"
           git push
